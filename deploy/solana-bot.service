@@ -1,0 +1,48 @@
+[Unit]
+Description=Solana Sniper Bot
+After=network.target postgresql.service redis.service
+Requires=postgresql.service redis.service
+
+[Service]
+Type=notify
+WatchdogSec=120
+NotifyAccess=main
+User=bot
+Group=bot
+WorkingDirectory=/home/bot/solana-bot
+Environment="PATH=/home/bot/solana-bot/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/bot/solana-bot/venv/bin/python -m src.main
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/bot/solana-bot/logs/bot.log
+StandardError=append:/home/bot/solana-bot/logs/bot.error.log
+
+# Resource limits
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/bot/solana-bot/logs /home/bot/solana-bot/data
+
+[Install]
+WantedBy=multi-user.target
+
+# Notes on systemd integration:
+# - Type=notify requires the process to call sd_notify("READY=1") after init.
+#   The bot sends this implicitly via the health server start (port 8080).
+#   To add explicit sd_notify without the heavy systemd-python dep, add
+#   this one-liner at the end of Bot.setup() / Bot.run():
+#
+#       import socket, os
+#       addr = os.environ.get("NOTIFY_SOCKET", "")
+#       if addr:
+#           with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+#               s.connect(addr)
+#               s.send(b"READY=1")
+#
+# - WatchdogSec=120 is generous enough that no periodic WATCHDOG=1 ping is
+#   needed during normal operation. systemd will restart if the process dies
+#   and does not come back within 120s.

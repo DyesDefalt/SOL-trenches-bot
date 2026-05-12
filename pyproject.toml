@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solana-sniper-bot"
+version = "0.1.0"
+description = "Solana memecoin sniper / trencher bot dengan smart money tracking"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "DyesDefalt" }]
+license = { text = "MIT" }
+
+dependencies = [
+    "httpx[http2]>=0.27.2",
+    "websockets>=13.1",
+    "asyncpg>=0.30.0",
+    "redis>=5.2.0",
+    "python-telegram-bot>=21.7",
+    "solders>=0.21.0",
+    "solana>=0.34.3",
+    "base58>=2.1.1",
+    "cryptography>=43.0.3",
+    "rich>=13.9.4",
+    "structlog>=24.4.0",
+    "pyyaml>=6.0.2",
+    "pydantic>=2.10.3",
+    "pydantic-settings>=2.7.0",
+    "uvloop>=0.21.0; sys_platform != 'win32'",
+    "orjson>=3.10.12",
+    "python-dotenv>=1.0.1",
+    "tenacity>=9.0.0",
+    "aiohttp>=3.10.0",
+    "prometheus-client>=0.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.4",
+    "mypy>=1.13.0",
+    "ipython>=8.30.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["E501"]  # handled by formatter
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
