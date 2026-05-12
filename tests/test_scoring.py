@@ -383,3 +383,148 @@ def test_multi_source_critical_flags_cause_reject(engine: ScoringEngine) -> None
         assert expected_reason in result.reject_reasons, (
             f"Expected '{expected_reason}' in reject_reasons for flag={flag}"
         )
+
+
+# ==========================================================================
+# Phase 9: Macro Regime + News + Cross-Reference scoring tests
+# ==========================================================================
+
+
+def test_macro_extreme_risk_off_rejects(engine: ScoringEngine, good_token: TokenData) -> None:
+    """macro_skip_entries=True → REJECT regardless of other signals."""
+    good_token.macro_skip_entries = True
+    good_token.macro_regime_level = "extreme_risk_off"
+    result = engine.score(good_token)
+    assert result.action == "REJECT"
+    assert any("macro_extreme_risk_off" in r for r in result.reject_reasons)
+
+
+def test_fud_high_severity_rejects(engine: ScoringEngine, good_token: TokenData) -> None:
+    """fud_detected + severity=high → REJECT (hack/exploit/SEC veto)."""
+    good_token.fud_detected = True
+    good_token.fud_severity = "high"
+    result = engine.score(good_token)
+    assert result.action == "REJECT"
+    assert "fud_event_high_severity" in result.reject_reasons
+
+
+def test_fud_medium_severity_penalizes_score(engine: ScoringEngine, good_token: TokenData) -> None:
+    """fud_detected + severity=medium → narrative_bonus reduced by 5, no reject."""
+    good_token.fud_detected = True
+    good_token.fud_severity = "medium"
+    good_token.narrative_bonus = 3.0  # base +3
+    result = engine.score(good_token)
+    assert result.action != "REJECT"
+    # Net narrative bonus should be 3 - 5 = -2 (clamped at -10)
+    assert result.breakdown.narrative_bonus == pytest.approx(-2.0)
+
+
+def test_narrative_bonus_clamped(engine: ScoringEngine, good_token: TokenData) -> None:
+    """narrative_bonus clamped to -10..+10."""
+    good_token.narrative_bonus = 25.0  # over cap
+    result = engine.score(good_token)
+    assert result.breakdown.narrative_bonus == 10.0
+
+    good_token.narrative_bonus = -25.0  # under cap
+    result = engine.score(good_token)
+    assert result.breakdown.narrative_bonus == -10.0
+
+
+def test_crossref_bonus_clamped(engine: ScoringEngine, good_token: TokenData) -> None:
+    """crossref_bonus clamped to -5..+15."""
+    good_token.crossref_bonus = 25.0
+    result = engine.score(good_token)
+    assert result.breakdown.crossref_bonus == 15.0
+
+    good_token.crossref_bonus = -20.0
+    result = engine.score(good_token)
+    assert result.breakdown.crossref_bonus == -5.0
+
+
+def test_crossref_listed_boosts_total_score(engine: ScoringEngine) -> None:
+    """Token with CoinGecko listing → crossref_bonus increases total score."""
+    token_unlisted = TokenData(
+        address="x",
+        mcap_usd=20_000,
+        liquidity_usd=15_000,
+        price_usd=0.001,
+        smart_money_count=2,
+        volume_5m_usd=4_000,
+        is_renounced=True,
+        lp_burned=True,
+        gmgn_security_score=80,
+        crossref_bonus=0.0,
+    )
+    token_listed = TokenData(
+        address="y",
+        mcap_usd=20_000,
+        liquidity_usd=15_000,
+        price_usd=0.001,
+        smart_money_count=2,
+        volume_5m_usd=4_000,
+        is_renounced=True,
+        lp_burned=True,
+        gmgn_security_score=80,
+        is_listed_on_coingecko=True,
+        coingecko_rank=300,
+        crossref_bonus=10.0,
+    )
+    score_unlisted = engine.score(token_unlisted).score
+    score_listed = engine.score(token_listed).score
+    assert score_listed > score_unlisted
+    assert score_listed - score_unlisted == pytest.approx(10.0)
+
+
+def test_position_size_macro_throttle_risk_off(engine: ScoringEngine) -> None:
+    """risk_off multiplier 0.5 → position size halved."""
+    base = engine.position_size_sol(score=85.0, macro_multiplier=1.0)
+    throttled = engine.position_size_sol(score=85.0, macro_multiplier=0.5)
+    assert throttled == pytest.approx(base * 0.5)
+
+
+def test_position_size_macro_throttle_extreme(engine: ScoringEngine) -> None:
+    """extreme risk-off multiplier 0.0 → position size 0."""
+    sized = engine.position_size_sol(score=90.0, macro_multiplier=0.0)
+    assert sized == 0.0
+
+
+def test_position_size_macro_boost_risk_on(engine: ScoringEngine) -> None:
+    """risk_on multiplier 1.3 → position size boosted, capped at settings max."""
+    sized = engine.position_size_sol(score=85.0, macro_multiplier=1.3)
+    # Base for score 85 = 0.035; 0.035 * 1.3 = 0.0455 (under 0.05 cap)
+    assert sized == pytest.approx(0.0455)
+
+
+def test_position_size_macro_caps_at_setting_max(engine: ScoringEngine) -> None:
+    """High multiplier on high score → capped at settings.max_position_size_sol."""
+    from src.config import settings as _s
+    sized = engine.position_size_sol(score=95.0, macro_multiplier=1.5)
+    # 0.05 * 1.5 = 0.075, but capped at settings.max_position_size_sol (default 0.05)
+    assert sized == pytest.approx(_s.max_position_size_sol)
+
+
+def test_position_size_below_minimum_threshold_returns_zero(engine: ScoringEngine) -> None:
+    """Throttled position too small (< 0.005 SOL) → 0 (avoid micro-trades)."""
+    # score 75 → base 0.015 → 0.015 * 0.2 = 0.003 SOL → below 0.005 floor → 0
+    sized = engine.position_size_sol(score=75.0, macro_multiplier=0.2)
+    assert sized == 0.0
+
+
+def test_to_dict_includes_phase9_fields(engine: ScoringEngine, good_token: TokenData) -> None:
+    """to_dict output exposes new Phase 9 context for DB persistence."""
+    good_token.macro_regime_level = "risk_on"
+    good_token.macro_position_multiplier = 1.3
+    good_token.narrative_match = True
+    good_token.is_listed_on_coingecko = True
+    good_token.coingecko_rank = 250
+    good_token.fud_detected = False
+    result = engine.score(good_token)
+    d = result.to_dict()
+    assert d["context"]["macro_regime_level"] == "risk_on"
+    assert d["context"]["macro_position_multiplier"] == 1.3
+    assert d["context"]["narrative_match"] is True
+    assert d["context"]["is_listed_on_coingecko"] is True
+    assert d["context"]["coingecko_rank"] == 250
+    assert d["context"]["fud_detected"] is False
+    assert "narrative_bonus" in d["breakdown"]
+    assert "crossref_bonus" in d["breakdown"]

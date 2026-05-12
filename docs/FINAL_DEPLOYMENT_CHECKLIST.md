@@ -17,8 +17,9 @@ Status: **All phases done.** This is the go-live checklist.
 | Multi-source intelligence (Nansen+Birdeye+Rugcheck+DexScreener+Pumpfun) | 7 | ✅ |
 | GMGN swap alternative | 7g | ✅ |
 | Production polish (health endpoint, Prometheus, systemd watchdog) | 8 | ✅ |
+| Extended intelligence (CryptoQuant+AlphaVantage+CryptoPanic+Messari+CoinGecko+Tokito) | 9 | ✅ |
 
-**Total: 179 unit tests pass.**
+**Total: 327 unit tests pass.**
 
 ## Pre-Flight Checklist
 
@@ -46,6 +47,16 @@ Status: **All phases done.** This is the go-live checklist.
 - [ ] (Optional) Birdeye API key
 - [ ] (Optional) OpenRouter API key — sign up at openrouter.ai, top up $5
 
+### Phase 9 Extended Intelligence (Optional — recommended for production)
+
+- [ ] CryptoQuant API key — https://cryptoquant.com/settings/api (free tier limited, $29/mo Pro recommended)
+- [ ] Alpha Vantage API key — https://www.alphavantage.co/support/#api-key (free tier 25 req/day)
+- [ ] CryptoPanic API key — https://cryptopanic.com/developers/api/about (free public)
+- [ ] Messari API key — https://messari.io/account/api (free 20 req/min)
+- [ ] CoinGecko Demo API key — https://www.coingecko.com/en/developers/dashboard (free 10k/mo)
+- [ ] Tokito API key — alternative LLM provider (OpenAI-compatible)
+- [ ] Run `make phase9-smoke` after entering keys — verify all 6 services respond
+
 ### Code Deployment
 
 - [ ] Code cloned/extracted ke `/home/bot/solana-bot`
@@ -60,6 +71,7 @@ Status: **All phases done.** This is the go-live checklist.
 
 - [ ] `make smoke` — semua 11 source pass (Helius, GMGN, GeckoTerminal, Telegram, Redis, Postgres, Nansen, Birdeye, Rugcheck, DexScreener, Pump.fun)
 - [ ] `make intel-smoke` — Phase 7 intel layer end-to-end works
+- [ ] `make phase9-smoke` — Phase 9 extended intel (6 sources + 3 aggregators)
 - [ ] `make bootstrap-wallets` — registry populated
 - [ ] `make stats-wallets` — verify A+B tier wallets >= 20
 
@@ -204,10 +216,17 @@ SELECT * FROM circuit_breaker_events
 | Rugcheck (Public) | $0 |
 | DexScreener (Public) | $0 |
 | Pump.fun (Public) | $0 |
-| Nansen Pro (optional) | $99 |
+| Nansen Pro (optional Phase 7) | $99 |
 | OpenRouter LLM (Phase 6, optional) | ~$1 |
-| **Total minimum (Phase 1-5 + 7 free-tier)** | **~$1-5** |
-| **Total maximum (all features + Nansen Pro)** | **~$105** |
+| CryptoQuant Pro (Phase 9, optional) | $29 |
+| Alpha Vantage (Phase 9 free tier) | $0 |
+| CryptoPanic (Phase 9 public) | $0 |
+| Messari (Phase 9 free tier) | $0 |
+| CoinGecko Demo (Phase 9 free tier) | $0 |
+| Tokito (Phase 9 alt LLM, pay-per-token) | ~$1-3 |
+| **Total minimum (Phase 1-5 + 7 + 9 free-tier)** | **~$1-5** |
+| **Total recommended (free + OpenRouter + CryptoQuant Pro)** | **~$31** |
+| **Total maximum (Nansen Pro + everything)** | **~$135** |
 
 ## Disclaimer
 

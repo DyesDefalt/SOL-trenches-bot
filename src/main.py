@@ -59,6 +59,16 @@ from src.intel.rugcheck_client import RugcheckClient
 from src.intel.smart_money import SmartMoneyAggregator
 from src.intel.token_verifier import TokenVerifier
 
+# Phase 9: Extended Intelligence (macro + news + cross-ref)
+from src.clients.alphavantage_client import AlphaVantageClient
+from src.clients.coingecko_client import CoinGeckoClient
+from src.clients.cryptopanic_client import CryptoPanicClient
+from src.clients.cryptoquant_client import CryptoQuantClient
+from src.clients.messari_client import MessariClient
+from src.intel.crossref_validator import CrossRefValidator
+from src.intel.macro_regime import MacroRegimeDetector
+from src.intel.news_aggregator import NewsAggregator
+
 log = get_logger(__name__)
 
 
@@ -90,6 +100,16 @@ class Bot:
         self.cluster_detector: ClusterDetector | None = None
         self.token_verifier: TokenVerifier | None = None
         self.pumpfun_tracker: PumpfunTracker | None = None
+
+        # Phase 9: Extended Intelligence (macro + news + cross-ref)
+        self.cryptoquant: CryptoQuantClient | None = None
+        self.alphavantage: AlphaVantageClient | None = None
+        self.cryptopanic: CryptoPanicClient | None = None
+        self.messari: MessariClient | None = None
+        self.coingecko: CoinGeckoClient | None = None
+        self.macro_detector: MacroRegimeDetector | None = None
+        self.news_aggregator: NewsAggregator | None = None
+        self.crossref_validator: CrossRefValidator | None = None
 
         # Infra
         self.db: Database | None = None
@@ -154,6 +174,33 @@ class Bot:
         self.dexscreener = DexscreenerClient()
         self.pumpfun = PumpfunClient()
 
+        # Phase 9: Extended Intelligence clients (all optional — graceful degrade)
+        if settings.cryptoquant_api_key:
+            self.cryptoquant = CryptoQuantClient()
+        else:
+            log.info("cryptoquant_disabled", note="CRYPTOQUANT_API_KEY not set, macro on-chain signals disabled")
+
+        if settings.alphavantage_api_key:
+            self.alphavantage = AlphaVantageClient()
+        else:
+            log.info("alphavantage_disabled", note="ALPHAVANTAGE_API_KEY not set, TradFi macro disabled")
+
+        if settings.cryptopanic_api_key:
+            self.cryptopanic = CryptoPanicClient()
+        else:
+            log.info("cryptopanic_disabled", note="CRYPTOPANIC_API_KEY not set, news sentiment disabled")
+
+        if settings.messari_api_key:
+            self.messari = MessariClient()
+        else:
+            log.info("messari_disabled", note="MESSARI_API_KEY not set, fundamentals cross-ref limited")
+
+        # CoinGecko works on Demo tier with free key (highly recommended)
+        if settings.coingecko_api_key:
+            self.coingecko = CoinGeckoClient()
+        else:
+            log.info("coingecko_disabled", note="COINGECKO_API_KEY not set, cross-ref validation limited")
+
         # Smart wallet registry
         self.registry = SmartWalletRegistry()
         await self.registry.load()
@@ -202,6 +249,31 @@ class Bot:
 
         self.pumpfun_tracker = PumpfunTracker(pumpfun_client=self.pumpfun)
 
+        # Phase 9: Build extended intelligence aggregators (all optional)
+        if settings.macro_regime_enabled and (self.cryptoquant or self.alphavantage):
+            self.macro_detector = MacroRegimeDetector(
+                cryptoquant=self.cryptoquant,
+                alphavantage=self.alphavantage,
+            )
+        else:
+            log.info("macro_detector_disabled", note="No CryptoQuant or Alpha Vantage key — macro context off")
+
+        if settings.news_narrative_enabled and (self.cryptopanic or self.messari):
+            self.news_aggregator = NewsAggregator(
+                cryptopanic=self.cryptopanic,
+                messari=self.messari,
+            )
+        else:
+            log.info("news_aggregator_disabled", note="No CryptoPanic or Messari key — narrative layer off")
+
+        if settings.crossref_validation_enabled and (self.coingecko or self.messari):
+            self.crossref_validator = CrossRefValidator(
+                coingecko=self.coingecko,
+                messari=self.messari,
+            )
+        else:
+            log.info("crossref_validator_disabled", note="No CoinGecko or Messari key — cross-ref off")
+
         # Signal engine with intel layer
         self.signal = SignalEngine(
             scanner=self.scanner,
@@ -213,6 +285,10 @@ class Bot:
             cluster_detector=self.cluster_detector,
             token_verifier=self.token_verifier,
             pumpfun_tracker=self.pumpfun_tracker,
+            # Phase 9: extended intelligence
+            macro_detector=self.macro_detector,
+            news_aggregator=self.news_aggregator,
+            crossref_validator=self.crossref_validator,
         )
 
         # Execution + position manager
@@ -326,8 +402,22 @@ class Bot:
             return
 
         token = result.token
-        sol_amount = self.scoring.position_size_sol(result.score)
+
+        # Phase 9: Macro regime throttles position size (or zero if extreme risk-off)
+        macro_mult = (
+            token.macro_position_multiplier
+            if settings.macro_regime_position_throttle_enabled
+            else 1.0
+        )
+        sol_amount = self.scoring.position_size_sol(result.score, macro_multiplier=macro_mult)
         if sol_amount <= 0:
+            log.info(
+                "buy_skipped_macro_throttle",
+                token=token.symbol or token.address[:8],
+                score=result.score,
+                macro_regime=token.macro_regime_level,
+                macro_mult=macro_mult,
+            )
             return
 
         log.info(
@@ -336,6 +426,10 @@ class Bot:
             score=result.score,
             sol_amount=sol_amount,
             sm_count=token.smart_money_count,
+            macro_regime=token.macro_regime_level,
+            macro_mult=macro_mult,
+            narrative_match=token.narrative_match,
+            crossref_listed=token.is_listed_on_coingecko,
         )
 
         trade = await self.execution.buy_token(
@@ -505,6 +599,12 @@ class Bot:
         # Close clients in reverse dependency order
         # (intel layer closed first, then transport clients, then infra)
         ordered_clients = [
+            # Phase 9 extended intel (depend on base clients) — close first
+            self.coingecko,
+            self.messari,
+            self.cryptopanic,
+            self.alphavantage,
+            self.cryptoquant,
             # Phase 7 intel (depend on base clients)
             self.pumpfun,
             self.dexscreener,

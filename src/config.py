@@ -122,6 +122,18 @@ class Settings(BaseSettings):
     # --- Birdeye (Phase 7) ---
     birdeye_api_key: str = ""
 
+    # --- CryptoQuant (Phase 9 macro) ---
+    cryptoquant_api_key: str = ""
+    cryptoquant_base_url: str = "https://api.cryptoquant.com/v1"
+
+    # --- Alpha Vantage (Phase 9 macro) ---
+    alphavantage_api_key: str = ""
+    alphavantage_base_url: str = "https://www.alphavantage.co"
+
+    # --- Macro regime feature flag (Phase 9) ---
+    macro_regime_enabled: bool = True
+    macro_regime_position_throttle_enabled: bool = True
+
     # --- Pump.fun (Phase 7) ---
     pumpfun_base_url: str = "https://frontend-api-v3.pump.fun"
 
@@ -158,9 +170,36 @@ class Settings(BaseSettings):
     ai_tuner_enabled: bool = False
     ai_wallet_blacklist_min_confidence: float = 0.85
 
+    # --- CryptoPanic (Phase 9 news) ---
+    cryptopanic_api_key: str = ""
+    cryptopanic_base_url: str = "https://cryptopanic.com/api/v1"
+
+    # --- Messari (Phase 9 cross-ref + news) ---
+    messari_api_key: str = ""
+    messari_base_url: str = "https://data.messari.io/api/v1"
+
+    # --- News & narrative feature flag (Phase 9) ---
+    news_narrative_enabled: bool = True
+    news_fud_detection_enabled: bool = True
+
     # --- Health & Metrics (Phase 8) ---
     health_port: int = 8080
     metrics_enabled: bool = True
+
+    # --- CoinGecko (Phase 9 cross-ref) ---
+    coingecko_api_key: str = ""
+    coingecko_base_url: str = "https://api.coingecko.com/api/v3"
+
+    # --- Tokito alternative LLM (Phase 9) ---
+    tokito_api_key: str = ""
+    tokito_base_url: str = "https://api.tokito.xyz/v1"
+    tokito_model: str = "pecut-ai"
+
+    # --- LLM provider selection (Phase 9) ---
+    llm_provider: Literal["openrouter", "tokito"] = "openrouter"
+
+    # --- Cross-ref feature flag (Phase 9) ---
+    crossref_validation_enabled: bool = True
 
     @field_validator("helius_rpc_url", "helius_wss_url", mode="after")
     @classmethod

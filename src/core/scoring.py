@@ -89,6 +89,19 @@ class TokenData:
     multi_source_safety_score: float = 1.0    # 0-1, dari TokenVerifier weighted_safety_score
     multi_source_critical_flags: list[str] = field(default_factory=list)
 
+    # Phase 9: Macro regime + news + cross-reference
+    macro_regime_level: str = "neutral"        # risk_on, neutral, risk_off, extreme_risk_off
+    macro_position_multiplier: float = 1.0     # 0.0-1.5, applied to position size
+    macro_skip_entries: bool = False           # hard skip flag (extreme_risk_off)
+    narrative_match: bool = False              # ticker matches trending narrative
+    narrative_bonus: float = 0.0               # -10 to +10, news/sentiment scoring
+    crossref_bonus: float = 0.0                # -5 to +15, CoinGecko+Messari listing
+    is_listed_on_coingecko: bool = False
+    coingecko_rank: int | None = None
+    is_listed_on_messari: bool = False
+    fud_detected: bool = False
+    fud_severity: str = ""                     # "high", "medium", "low", ""
+
 
 @dataclass
 class ScoreBreakdown:
@@ -108,6 +121,10 @@ class ScoreBreakdown:
     cluster_signal_bonus: float = 0.0
     pumpfun_bonus: float = 0.0
 
+    # Phase 9: narrative + cross-reference bonuses
+    narrative_bonus: float = 0.0
+    crossref_bonus: float = 0.0
+
     def total(self) -> float:
         return (
             self.smart_money
@@ -121,6 +138,8 @@ class ScoreBreakdown:
             + self.smart_money_trend_bonus
             + self.cluster_signal_bonus
             + self.pumpfun_bonus
+            + self.narrative_bonus
+            + self.crossref_bonus
         )
 
 
@@ -153,6 +172,8 @@ class ScoreResult:
                 "smart_money_trend_bonus": round(self.breakdown.smart_money_trend_bonus, 2),
                 "cluster_signal_bonus": round(self.breakdown.cluster_signal_bonus, 2),
                 "pumpfun_bonus": round(self.breakdown.pumpfun_bonus, 2),
+                "narrative_bonus": round(self.breakdown.narrative_bonus, 2),
+                "crossref_bonus": round(self.breakdown.crossref_bonus, 2),
             },
             "context": {
                 "mcap_usd": self.token.mcap_usd,
@@ -166,6 +187,13 @@ class ScoreResult:
                 "pumpfun_graduation_pct": self.token.pumpfun_graduation_pct,
                 "multi_source_safety_score": self.token.multi_source_safety_score,
                 "multi_source_critical_flags": self.token.multi_source_critical_flags,
+                "macro_regime_level": self.token.macro_regime_level,
+                "macro_position_multiplier": self.token.macro_position_multiplier,
+                "narrative_match": self.token.narrative_match,
+                "is_listed_on_coingecko": self.token.is_listed_on_coingecko,
+                "coingecko_rank": self.token.coingecko_rank,
+                "fud_detected": self.token.fud_detected,
+                "fud_severity": self.token.fud_severity,
             },
         }
 
@@ -249,6 +277,15 @@ class ScoringEngine:
     def _check_hard_filters(self, t: TokenData) -> list[str]:
         """Return list of reasons untuk reject. Empty = passes filter."""
         reasons: list[str] = []
+
+        # Phase 9: Macro regime hard skip — extreme risk-off blocks all new entries
+        if t.macro_skip_entries:
+            reasons.append(f"macro_extreme_risk_off (regime={t.macro_regime_level})")
+
+        # Phase 9: High-severity FUD detected (hack/exploit/SEC lawsuit) → veto
+        if t.fud_detected and t.fud_severity == "high":
+            reasons.append("fud_event_high_severity")
+
         if t.mcap_usd > self.max_mcap_usd:
             reasons.append(f"mcap_too_high (${t.mcap_usd:.0f} > ${self.max_mcap_usd:.0f})")
         if t.liquidity_usd < self.min_liquidity_usd:
@@ -447,6 +484,30 @@ class ScoringEngine:
         """
         return float(t.pumpfun_score_bonus)
 
+    # ------------------------------------------------------------------
+    # Phase 9: new signal scorers (narrative + cross-reference)
+    # ------------------------------------------------------------------
+
+    def _score_narrative(self, t: TokenData) -> float:
+        """
+        Narrative & sentiment bonus dari NewsAggregator.
+
+        Clamp -10 to +10. Already computed upstream — return as-is.
+        Medium-severity FUD penalty applied here (high goes to hard reject above).
+        """
+        bonus = max(-10.0, min(10.0, t.narrative_bonus))
+        if t.fud_detected and t.fud_severity == "medium":
+            bonus -= 5.0
+        return max(-10.0, bonus)
+
+    def _score_crossref(self, t: TokenData) -> float:
+        """
+        Cross-reference validation bonus dari CrossRefValidator.
+
+        Clamp -5 to +15.
+        """
+        return max(-5.0, min(15.0, t.crossref_bonus))
+
     def _penalty_bundle(self, t: TokenData) -> float:
         """Bundle/insider penalty (negative score)."""
         if t.bundle_supply_pct <= 5:
@@ -488,6 +549,9 @@ class ScoringEngine:
             smart_money_trend_bonus=self._score_smart_money_trend(token),
             cluster_signal_bonus=self._score_cluster_signal(token),
             pumpfun_bonus=self._score_pumpfun(token),
+            # Phase 9: narrative + cross-reference bonuses
+            narrative_bonus=self._score_narrative(token),
+            crossref_bonus=self._score_crossref(token),
         )
 
         total = breakdown.total()
@@ -509,7 +573,7 @@ class ScoringEngine:
             breakdown=breakdown,
         )
 
-    def position_size_sol(self, score: float) -> float:
+    def position_size_sol(self, score: float, macro_multiplier: float = 1.0) -> float:
         """
         Confidence-adjusted position sizing (Kelly fractional).
 
@@ -517,13 +581,31 @@ class ScoringEngine:
         Score 80-84: 0.025 SOL (medium)
         Score 85-89: 0.035 SOL (high)
         Score 90+:   0.050 SOL (very high)
+
+        Phase 9: macro_multiplier (0.0-1.5) applied at the end.
+        - risk_on (1.3): boosts size up to 0.065 SOL on score 90+
+        - neutral (1.0): no change (default for backward compat)
+        - risk_off (0.5): cuts size in half
+        - extreme_risk_off (0.0): zero — caller should hard-skip
+        Floor at 0.005 SOL minimum (or 0 if multiplier=0).
         """
         if score >= 90:
-            return 0.050
-        if score >= 85:
-            return 0.035
-        if score >= 80:
-            return 0.025
-        if score >= 75:
-            return 0.015
-        return 0.0  # below buy threshold
+            base = 0.050
+        elif score >= 85:
+            base = 0.035
+        elif score >= 80:
+            base = 0.025
+        elif score >= 75:
+            base = 0.015
+        else:
+            return 0.0  # below buy threshold
+
+        # Clamp multiplier to safe range
+        mult = max(0.0, min(1.5, macro_multiplier))
+        sized = base * mult
+
+        # Below min effective size → skip (avoid micro-trades eating fees)
+        if sized < 0.005:
+            return 0.0
+        # Cap at hard ceiling per env (safety)
+        return min(sized, settings.max_position_size_sol)

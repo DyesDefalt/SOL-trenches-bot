@@ -31,6 +31,9 @@ if TYPE_CHECKING:
     from src.core.scanner import TokenScanner
     from src.core.smart_wallet_registry import SmartWalletRegistry
     from src.intel.cluster_detector import ClusterDetector
+    from src.intel.crossref_validator import CrossRefValidator
+    from src.intel.macro_regime import MacroRegimeDetector
+    from src.intel.news_aggregator import NewsAggregator
     from src.intel.pumpfun_tracker import PumpfunTracker
     from src.intel.smart_money import SmartMoneyAggregator
     from src.intel.token_verifier import TokenVerifier
@@ -52,6 +55,10 @@ class SignalEngine:
         cluster_detector: "ClusterDetector | None" = None,
         token_verifier: "TokenVerifier | None" = None,
         pumpfun_tracker: "PumpfunTracker | None" = None,
+        # Phase 9: extended intelligence
+        macro_detector: "MacroRegimeDetector | None" = None,
+        news_aggregator: "NewsAggregator | None" = None,
+        crossref_validator: "CrossRefValidator | None" = None,
     ) -> None:
         self.scanner = scanner
         self.gmgn = gmgn
@@ -65,6 +72,14 @@ class SignalEngine:
         self.token_verifier = token_verifier
         self.pumpfun_tracker = pumpfun_tracker
 
+        # Phase 9 intel layer (optional — degrades gracefully)
+        self.macro_detector = macro_detector
+        self.news_aggregator = news_aggregator
+        self.crossref_validator = crossref_validator
+
+        # Cached macro regime per-cycle (avoid duplicate API calls across candidates)
+        self._cycle_macro: dict | None = None
+
     async def evaluate_cycle(self, max_candidates: int = 30) -> list[ScoreResult]:
         """One cycle: scan + enrich + score semua candidate."""
         candidates = await self.scanner.scan(max_results=max_candidates)
@@ -72,6 +87,9 @@ class SignalEngine:
 
         top_wallets = self.registry.get_top_tier_wallets(max_count=100)
         smart_addresses = [w.address for w in top_wallets]
+
+        # Phase 9: Fetch macro regime + market sentiment once per cycle (cached upstream)
+        await self._refresh_macro_context()
 
         results: list[ScoreResult] = []
         for cand in candidates:
@@ -130,13 +148,18 @@ class SignalEngine:
             volume_increasing=candidate.get("volume_5m_usd", 0) > candidate.get("volume_1h_usd", 0) / 12,
         )
 
-        # Parallel enrichment: legacy GMGN + Phase 7 intel
+        # Phase 9: Apply cycle-level macro context to every candidate
+        self._apply_macro_context(token)
+
+        # Parallel enrichment: legacy GMGN + Phase 7 intel + Phase 9 narrative/crossref
         await asyncio.gather(
             self._enrich_gmgn_legacy(token, smart_addresses),
             self._enrich_smart_money(token),
             self._enrich_cluster(token),
             self._enrich_verifier(token),
             self._enrich_pumpfun(token),
+            self._enrich_narrative(token),
+            self._enrich_crossref(token),
             return_exceptions=True,
         )
 
@@ -215,3 +238,78 @@ class SignalEngine:
             token.pumpfun_score_bonus = status.score_bonus
         except Exception as e:
             log.debug("pumpfun_enrich_failed", token=token.address[:8], error=str(e))
+
+    # ------------------------------------------------------------------
+    # Phase 9: Macro + News + Cross-Reference enrichment
+    # ------------------------------------------------------------------
+
+    async def _refresh_macro_context(self) -> None:
+        """Fetch macro regime + market sentiment once per cycle. Cached on detector side."""
+        self._cycle_macro = None
+        if not self.macro_detector or not settings.macro_regime_enabled:
+            return
+        try:
+            regime = await self.macro_detector.detect_regime()
+            self._cycle_macro = {
+                "level": regime.level.value if hasattr(regime.level, "value") else str(regime.level),
+                "multiplier": regime.position_size_multiplier,
+                "skip_entries": regime.should_skip_entries,
+            }
+            log.info(
+                "macro_regime_detected",
+                level=self._cycle_macro["level"],
+                multiplier=self._cycle_macro["multiplier"],
+                skip_entries=self._cycle_macro["skip_entries"],
+                reasons=regime.reasons[:3],
+            )
+        except Exception as e:
+            log.debug("macro_regime_fetch_failed", error=str(e))
+            self._cycle_macro = None
+
+    def _apply_macro_context(self, token: TokenData) -> None:
+        """Apply cycle-level macro regime to token."""
+        if not self._cycle_macro:
+            return
+        token.macro_regime_level = self._cycle_macro["level"]
+        token.macro_position_multiplier = self._cycle_macro["multiplier"]
+        token.macro_skip_entries = self._cycle_macro["skip_entries"]
+
+    async def _enrich_narrative(self, token: TokenData) -> None:
+        """News + sentiment + FUD detection via NewsAggregator."""
+        if not self.news_aggregator or not settings.news_narrative_enabled:
+            return
+        if not token.symbol:
+            return  # need symbol for ticker lookups
+        try:
+            narrative = await self.news_aggregator.check_token_narrative(
+                symbol=token.symbol,
+                contract_address=token.address,
+            )
+            token.narrative_match = narrative.narrative_match
+            token.narrative_bonus = narrative.narrative_bonus
+            token.is_listed_on_messari = narrative.is_listed_on_messari
+
+            # FUD detection (separate call for batch efficiency, but per-token works for low candidate counts)
+            if settings.news_fud_detection_enabled:
+                fud_events = await self.news_aggregator.detect_fud_events([token.symbol])
+                if fud_events:
+                    event = fud_events[0]
+                    token.fud_detected = True
+                    token.fud_severity = event.severity
+        except Exception as e:
+            log.debug("narrative_enrich_failed", token=token.address[:8], error=str(e))
+
+    async def _enrich_crossref(self, token: TokenData) -> None:
+        """CoinGecko + Messari legitimacy cross-reference."""
+        if not self.crossref_validator or not settings.crossref_validation_enabled:
+            return
+        try:
+            result = await self.crossref_validator.validate_token(
+                contract_address=token.address,
+                symbol=token.symbol or None,
+            )
+            token.is_listed_on_coingecko = result.coingecko_listed
+            token.coingecko_rank = result.coingecko_rank
+            token.crossref_bonus = result.cross_ref_bonus
+        except Exception as e:
+            log.debug("crossref_enrich_failed", token=token.address[:8], error=str(e))

@@ -106,6 +106,9 @@ nansen-discover:
 intel-smoke:
 	. venv/bin/activate && python scripts/intel_smoke.py
 
+phase9-smoke:
+	. venv/bin/activate && python scripts/phase9_smoke.py
+
 tuner-run:
 	. venv/bin/activate && python scripts/run_weekly_tuner.py
 

@@ -210,6 +210,89 @@ Cost: ~$0.30-1.00/bulan dengan Gemini + Haiku mix (hard cap `LLM_DAILY_COST_CAP_
 - **Graceful Shutdown** — ordered client teardown with timeouts
 - **Systemd WatchdogSec=120** — auto-restart kalau bot hang
 
+## Phase 9: Extended Intelligence (Macro + News + Cross-Reference)
+
+Added 6 new data sources to lift the bot from "single-source memecoin sniper" to "multi-layer market intelligence":
+
+### Macro Regime Layer
+- **CryptoQuant** — BTC exchange flows, MVRV, funding rates, Coinbase premium
+- **Alpha Vantage** — SPX/DXY/VIX proxies (SPY, UUP, VIXY ETFs as TradFi indicators)
+- Output: regime enum (`risk_on` / `neutral` / `risk_off` / `extreme_risk_off`)
+- **Effect on trading:**
+  - `extreme_risk_off` (BTC -10%+ OR DXY surge + SPX dump) → hard skip new entries
+  - `risk_off` → position size × 0.5
+  - `neutral` → no change
+  - `risk_on` (BTC +5% + supportive macro) → position size × 1.3 (capped at max)
+
+### Narrative & News Layer
+- **CryptoPanic** — Real-time crypto news with sentiment voting (positive/negative/important)
+- **Messari** — Asset profiles + research signals + news feed
+- Output: `narrative_bonus` (-10 to +10) + FUD detection
+- **Effect on scoring:**
+  - Ticker matches trending narrative → +5 score
+  - High sentiment (>0.3) → +3
+  - Mentioned >5x in 24h → +2
+  - **High-severity FUD** (hack/exploit/SEC) → hard reject
+  - Medium-severity FUD → -5 to narrative bonus
+
+### Cross-Reference Layer
+- **CoinGecko** — Validates token via contract lookup; bonus if listed + ranked
+- **Messari** — Cross-check asset profile
+- Output: `crossref_bonus` (-5 to +15)
+- **Effect on scoring:**
+  - Listed on CoinGecko → +5
+  - CG market cap rank top 500 → +5 stacking
+  - CG top 100 → +10 stacking (rare for memecoin = strong legitimacy signal)
+  - Currently trending → +5 additional
+  - NOT listed AND age > 7d → -3 (suspicious — established but never indexed)
+
+### Alternative LLM Provider
+- **Tokito (pecut-ai)** — OpenAI-compatible endpoint as OpenRouter alternative
+- Same `complete_structured()` interface — swap via `LLM_PROVIDER=tokito`
+- Use case: cheaper rug check calls, fallback when OpenRouter rate-limits
+
+### Cost Impact
+All 6 services have free or near-free tiers:
+
+| Service | Free Tier | Paid Tier |
+|---|---|---|
+| CryptoQuant | Limited endpoints | $29/mo Pro |
+| Alpha Vantage | 25 req/day | $50/mo Premium |
+| CryptoPanic | 5 req/sec public | $50/mo Pro |
+| Messari | 20 req/min | $24/mo Lite |
+| CoinGecko | Demo 10k/mo | $129/mo Analyst |
+| Tokito | Pay-per-token | n/a |
+
+**Recommended:** Start with all FREE tiers. CryptoQuant's free tier may 403 some endpoints — handled gracefully. Bot still works with any subset of Phase 9 enabled.
+
+### Scoring Components Total
+
+The engine now has **12 scoring components**:
+
+| Component | Weight | Type |
+|---|---|---|
+| Smart Money Count | 35 | Additive |
+| MCAP & "Below ATH" | 20 | Additive |
+| Volume & Momentum | 15 | Additive |
+| Liquidity & Fees | 10 | Additive |
+| Security (multi-source override) | 10 | Additive |
+| KOL/Social | 5 | Additive |
+| Bundle/Insider | -10 | Penalty |
+| Smart Money Trend (Nansen) | -30 to +30 | Bonus |
+| Cluster Signal (GMGN) | 0 to +20 | Bonus |
+| Pump.fun Graduation | -5 to +10 | Bonus |
+| **Narrative + News** | **-10 to +10** | **Bonus** |
+| **Cross-Reference** | **-5 to +15** | **Bonus** |
+
+Plus macro regime as a final position-size multiplier (0.0-1.5x).
+
+### Quick Test
+
+```bash
+# Run Phase 9 smoke test (probes all 6 APIs)
+make phase9-smoke
+```
+
 ## Project Structure
 
 ```
