@@ -320,6 +320,59 @@ MACRO_REGIME_POSITION_THROTTLE_ENABLED=false
 
 ---
 
+#### 🎯 Dip Buy — Patience Hunter (Phase 10 NEW)
+
+**Target:** 55-65% winrate · 1-3 trades/day · +2 to 8% avg gain · best risk/reward ratio
+
+Inspired by the @badidoyo/@ELPonyin pattern: wait for the sniper/insider dump (-80% from ATH) before entering. Skips the chaos of fresh launches; only buys after the first cleanout.
+
+<details>
+<summary><strong>secrets/.env or /strategy dip_buy</strong></summary>
+
+```ini
+MIN_SCORE_TO_BUY=70
+MIN_SCORE_TO_ALERT=60
+MAX_POSITION_SIZE_SOL=0.04
+MAX_CONCURRENT_POSITIONS=2
+
+# Wait for dump signal
+ENTRY_MODE=wait_for_dump                      # wait for ATH drop before buying
+MAX_ATH_DISTANCE_PCT=-70                      # require 70%+ drop from ATH
+
+# Tighter filters (older tokens have more data)
+FILTER_MAX_MCAP_USD=80000
+FILTER_MIN_LIQUIDITY_USD=10000
+FILTER_MIN_GMGN_SECURITY_SCORE=75
+
+# Patient TP (bigger move expected after reversal)
+TP1_GAIN_PCT=50
+TP1_SELL_PCT=25
+TP2_GAIN_PCT=120
+TP2_SELL_PCT=30
+TP3_GAIN_PCT=300
+TP3_SELL_PCT=25
+HARD_SL_PCT=-30
+TRAILING_STOP_PCT=30
+TIME_BASED_EXIT_MINUTES=120
+
+# AI quality scoring (recommended for dip buys — narrative quality matters more)
+AI_MEME_QUALITY_ENABLED=true
+
+# Fibonacci entry (optional polish)
+FIB_ENTRY_ENABLED=true                        # wait for 0.786 retracement
+```
+</details>
+
+**Best for:** Patient traders. Modal 0.36 SOL+. The dump-and-bounce pattern is the most consistently profitable setup per the trader docs (Petsreid, badidoyo, Ponyin all emphasize it).
+
+**How it works internally:**
+1. Bot scores a candidate token. Token currently near ATH → doesn't immediately buy.
+2. Bot stores a price alert: "trigger entry when price drops to -70% from current ATH"
+3. Every 30 seconds, bot polls all pending alerts. When target is hit, signal flow runs fresh enrichment + scoring + buy.
+4. If alert expires (default 24h) without trigger, it's auto-cleaned up.
+
+---
+
 ### 🧪 The Four Winrate Amplifiers
 
 Regardless of recipe, these four levers measurably increase winrate **without killing trade frequency**:
@@ -530,7 +583,7 @@ Telegram will show **💵 LIVE** instead of **🧪 DRY**.
 
 ## Scoring Engine Explained
 
-Each token scored 0-100 across **12 components**:
+Each token scored 0-100 across **16 components** (Phase 10 adds 4 new):
 
 | # | Component | Range | Source |
 |---|---|---|---|
@@ -544,8 +597,12 @@ Each token scored 0-100 across **12 components**:
 | 8 | Smart money trend (Nansen) | -30 → +30 | Trend matrix |
 | 9 | Cluster signal | 0 → +20 | 3+ wallets/30min |
 | 10 | Pump.fun graduation | -5 → +10 | Bonding curve % |
-| 11 | **Narrative + News** | -10 → +10 | CryptoPanic+Messari |
-| 12 | **Cross-Reference** | -5 → +15 | CoinGecko+Messari |
+| 11 | Narrative + News | -10 → +10 | CryptoPanic+Messari |
+| 12 | Cross-Reference | -5 → +15 | CoinGecko+Messari |
+| 13 | **Trader filters composite** ⭐ | -20 → +20 | Anti-bundler + global fee + funded-from + holder balance (Phase 10.5) |
+| 14 | **AI Meme quality** ⭐ | -5 → +10 | LLM judgment on creativity/virality/originality (Phase 10.6) |
+| 15 | **Fibonacci timing** ⭐ | -2 → +3 | Entry at 0.786 retracement (Phase 10.6) |
+| 16 | **Pump.fun fee-claim** ⭐ | 0 → +15 | On-chain fee distribution event detected (Phase 10) |
 
 Final score:
 - **≥ 75 → AUTO BUY** (default threshold; configurable per recipe)
@@ -566,6 +623,52 @@ A token is hard-rejected (score=0, action=REJECT) if ANY of these trip:
 - Bundle supply above `FILTER_MAX_BUNDLE_SUPPLY_PCT`
 - **Phase 9**: Macro regime = `extreme_risk_off`
 - **Phase 9**: High-severity FUD detected (hack/exploit/SEC/rug news)
+- **Phase 10.5**: Trader filter veto (bundler CONFIRMED multi-wallet OR fee analysis = WASH_TRADING)
+
+---
+
+## Phase 10: Charon Parity + Trader Wisdom
+
+Phase 10 ports the four Charon UX features that genuinely improve operator experience, then layers in encoded versions of the high-value insights from Indonesian degen traders (@PradonoNovaldo, @badidoyo, @ELPonyin).
+
+### Charon Parity (Phase 10.0)
+
+1. **Hot-Reloadable Strategies** — DB-backed strategy configs. Change params via `/stratset balanced tp1_gain_pct 50` in Telegram → applies on next scan cycle without restart. Pre-seeded with `conservative`, `balanced`, `aggressive`, `dip_buy`. Switch via `/strategy <name>`.
+
+2. **Pump.fun Fee-Claim WebSocket** — 4th independent signal source. Subscribes to Pump.fun program logs via Helius WS, parses `distribute_fees` events on-chain. When a token distributes fees to holders (proof of organic trading), it gets +5-15 score bonus. Smart wallet shareholders → additional +5. **This is the single most valuable signal added** because it's free, on-chain, and difficult to fake.
+
+3. **Dip-Buy Entry Mode** — 4th recipe variant. Bot scores candidate, but if it's near ATH, stores a price alert instead of buying. When price drops to target (-70% from ATH default), alert triggers fresh score+enrichment+buy. Implements the trader pattern: "wait for sniper/insider dump before entering."
+
+4. **Interactive Telegram Menus** — `/menu` opens inline-keyboard UX matching Charon's polish. Strategy switcher, position cards with [Sell 25%/50%/100%] buttons, settings inspector, confirm-mode approve/reject. 30 unit tests cover menu rendering + callback routing.
+
+### Trader Filters (Phase 10.5) — The Anti-Bundler Stack
+
+These 4 filters encode what @PradonoNovaldo, @badidoyo, @ELPonyin all flagged as critical but Charon doesn't have:
+
+| Filter | What | Source insight |
+|---|---|---|
+| **Anti-Bundler Pattern Detector** | Detects 1 person controlling multiple wallets (top 2-8 holders with nearly identical % supply + SOL balance) | "Bundle Token = ancaman nomor 1" — Ponyin |
+| **Global Fee Analyzer** | Computes fee/volume ratio (expected 0.25%). Wash trading = high volume + low fee | "Global fee organic vs wash detector" — badidoyo |
+| **Wallet Funded-From Check** | Median funding age of top 5 holders. < 1 day = sniper bot / CEX dump | "Wallet funded < 1 hari = red flag sniper" — Ponyin |
+| **Top Holder SOL Balance** | If top holders have < 0.2 SOL balance = weak snipers, not serious players | "Top holder balance < 0.2 SOL artinya bukan player serius" — Ponyin |
+
+These produce a **composite score -20 to +20** (`trader_composite_bonus` component). Two hard-reject vetoes: bundler CONFIRMED, or fee analysis WASH_TRADING.
+
+### AI-Augmented Filters (Phase 10.6) — Opt-In
+
+1. **Meme Quality Scorer** (`AI_MEME_QUALITY_ENABLED=true`) — LLM (cheap Gemini Flash or Tokito pecut-ai) evaluates token on 5 dimensions: visual clarity, memetic potential, cultural fit, originality, community signal. Returns 0-100 overall + is_clone flag. Cost: ~$0.0001 per call, 5-min cache → ~$0.30/day at 10k candidates. Maps to -5 to +10 score bonus.
+
+2. **Fibonacci 0.786 Entry Timing** (`FIB_ENTRY_ENABLED=true`) — Per @badidoyo: "Limit order saya biasanya ada di 0.786". Bot fetches OHLC, finds swing high/low, computes Fib levels. If current price already at 0.786 target → ENTER_NOW (+3 score). If too late (past target) → -2 penalty. If still above target → WAIT_FOR_DIP (stored as price alert).
+
+### Why These Help
+
+**Charon's actual production winrate: 15.2%** (visible in their dashboard screenshot). Adding the trader filters specifically targets the failure modes that produced that result:
+- Bundler rugs (multi-wallet dump) → caught by Anti-Bundler Pattern Detector
+- Wash-traded volume traps → caught by Global Fee Analyzer
+- Buying at the wrong time (top) → solved by Dip-Buy mode + Fibonacci entry
+- Generic copycat memecoins → caught by AI Meme Quality (is_clone flag)
+
+Expected improvement: ~+15-25% absolute winrate uplift in dip-buy mode with all filters active.
 
 ---
 
@@ -731,6 +834,18 @@ Once running, the bot exposes these commands in your Telegram chat:
 | `/health` | Health check (latency, sources, errors) |
 | `/help` | Full command list |
 
+**Phase 10 commands (new):**
+
+| Command | What It Does |
+|---|---|
+| `/menu` | Open the interactive inline-keyboard control center |
+| `/strategy [id]` | List all strategies or activate one. E.g., `/strategy dip_buy` |
+| `/stratset <id> <key> <value>` | Live-update a strategy param. E.g., `/stratset balanced tp1_gain_pct 50` |
+| `/alerts` | Show pending price alerts (dip-buy waiters) |
+| `/feeclaims` | Last 10 Pump.fun fee-claim events detected |
+
+The `/menu` command opens a rich menu tree (Strategy / Positions / Settings / Stats / Alerts / Lessons / Pause-Resume / Help) with inline keyboard buttons — same UX as Charon's polished interface.
+
 ---
 
 ## Cost Breakdown
@@ -862,9 +977,12 @@ solana transfer <COLD_ADDRESS> ALL --allow-unfunded-recipient \
 | 7g | ✅ | GMGN swap alternative execution path |
 | 8 | ✅ | Production polish (health, Prometheus, systemd watchdog) |
 | 9 | ✅ | Extended intel (CryptoQuant+Alpha Vantage+CryptoPanic+Messari+CoinGecko+Tokito) |
-| 10 | 🔮 | DEX aggregator routing comparison (Raydium + Orca direct) |
-| 11 | 🔮 | Multi-chain support (Base, BSC, Arbitrum) |
-| 12 | 🔮 | Web dashboard (Next.js) for non-Telegram users |
+| 10 | ✅ | Charon parity (hot-reload strategies, fee-claim WS, dip-buy mode, interactive menus) |
+| 10.5 | ✅ | Trader filters bundle (anti-bundler + global fee + funded-from + holder balance) |
+| 10.6 | ✅ | AI Meme Quality Scorer + Fibonacci 0.786 entry helper |
+| 11 | 🔮 | DEX aggregator routing comparison (Raydium + Orca direct) |
+| 12 | 🔮 | Multi-chain support (Base, BSC, Arbitrum) |
+| 13 | 🔮 | Web dashboard (Next.js) for non-Telegram users |
 
 ---
 

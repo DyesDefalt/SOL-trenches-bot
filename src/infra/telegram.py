@@ -29,6 +29,7 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
@@ -54,6 +55,9 @@ class TelegramBot:
         cb: "CircuitBreaker | None" = None,
         position_manager: "PositionManager | None" = None,
         db: "Database | None" = None,
+        callback_router: object | None = None,
+        strategy_manager: object | None = None,
+        price_alert_manager: object | None = None,
     ) -> None:
         self.token = settings.telegram_bot_token
         self.chat_id = settings.telegram_chat_id
@@ -64,6 +68,10 @@ class TelegramBot:
         self.cb = cb
         self.position_manager = position_manager
         self.db = db
+        # Phase 10: optional interactive menu router + strategy/alerts handles
+        self.callback_router = callback_router
+        self.strategy_manager = strategy_manager
+        self.price_alert_manager = price_alert_manager
         self._app: Application | None = None
 
     def _build_app(self) -> Application:
@@ -82,6 +90,15 @@ class TelegramBot:
         # Phase 6b/6c commands
         app.add_handler(CommandHandler("applyTuning", self._handle_apply_tuning))
         app.add_handler(CommandHandler("walletinfo", self._handle_wallet_info))
+        # Phase 10: interactive menu commands
+        app.add_handler(CommandHandler("menu", self._handle_menu))
+        app.add_handler(CommandHandler("strategy", self._handle_strategy))
+        app.add_handler(CommandHandler("stratset", self._handle_stratset))
+        app.add_handler(CommandHandler("alerts", self._handle_alerts))
+        app.add_handler(CommandHandler("feeclaims", self._handle_feeclaims))
+        # Phase 10: inline button callbacks (e.g., menu navigation, approve/reject intents)
+        if self.callback_router is not None:
+            app.add_handler(CallbackQueryHandler(self.callback_router.handle_callback))
         return app
 
     async def start_polling(self) -> None:
@@ -414,3 +431,119 @@ class TelegramBot:
             msg = f"Wallet <code>{address[:12]}...</code> not in registry"
 
         await update.message.reply_html(msg)
+
+    # ----------------------------------------------------------------------
+    # Phase 10: Interactive menu + strategy hot-reload + alerts inspection
+    # ----------------------------------------------------------------------
+
+    async def _handle_menu(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show the top-level inline-keyboard main menu."""
+        if not self._is_authorized(update):
+            return
+        try:
+            from src.infra.telegram_menus import build_main_menu
+        except ImportError:
+            await update.message.reply_text("Menus not available.")
+            return
+        markup = build_main_menu()
+        await update.message.reply_html(
+            "<b>🎛️ Bot Control Center</b>\nPilih action di bawah:",
+            reply_markup=markup,
+        )
+
+    async def _handle_strategy(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show strategy list / switch active strategy."""
+        if not self._is_authorized(update):
+            return
+        if not self.strategy_manager:
+            await update.message.reply_text("Strategy manager not configured.")
+            return
+        args = ctx.args or []
+        if not args:
+            try:
+                strategies = await self.strategy_manager.list_all()
+                lines = ["<b>📊 Available Strategies:</b>"]
+                for s in strategies:
+                    marker = "✓" if s.get("enabled") else "○"
+                    lines.append(f"{marker} <code>{s['id']}</code> — {s.get('name', s['id'])}")
+                lines.append("\nUsage: <code>/strategy &lt;id&gt;</code> to activate")
+                await update.message.reply_html("\n".join(lines))
+            except Exception as e:
+                await update.message.reply_text(f"Failed to list: {e}")
+            return
+        target = args[0]
+        try:
+            ok = await self.strategy_manager.set_active(target)
+            if ok:
+                await update.message.reply_html(f"✓ Strategy <b>{target}</b> activated.")
+            else:
+                await update.message.reply_text(f"Strategy '{target}' not found.")
+        except Exception as e:
+            await update.message.reply_text(f"Failed: {e}")
+
+    async def _handle_stratset(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Update a single param of a strategy: /stratset <strategy_id> <key> <value>."""
+        if not self._is_authorized(update):
+            return
+        if not self.strategy_manager:
+            await update.message.reply_text("Strategy manager not configured.")
+            return
+        args = ctx.args or []
+        if len(args) < 3:
+            await update.message.reply_text("Usage: /stratset <strategy_id> <key> <value>")
+            return
+        sid, key, value = args[0], args[1], args[2]
+        try:
+            ok = await self.strategy_manager.update_config(sid, key, value)
+            if ok:
+                await update.message.reply_html(
+                    f"✓ <b>{sid}.{key}</b> = <code>{value}</code>"
+                )
+            else:
+                await update.message.reply_text("Update returned 0 rows. Check strategy id.")
+        except Exception as e:
+            await update.message.reply_text(f"Failed: {e}")
+
+    async def _handle_alerts(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """List pending price alerts (dip-buy / wait-for-dump)."""
+        if not self._is_authorized(update):
+            return
+        if not self.price_alert_manager:
+            await update.message.reply_text("Price alerts not configured.")
+            return
+        try:
+            alerts = await self.price_alert_manager.list_pending()
+            if not alerts:
+                await update.message.reply_text("No pending price alerts.")
+                return
+            lines = ["<b>⏳ Pending Price Alerts:</b>"]
+            for a in alerts[:10]:
+                target = a.get("target_price_usd") or a.get("target_ath_distance_pct", "?")
+                lines.append(
+                    f"<code>{a['mint'][:8]}...</code> {a.get('symbol', '')} "
+                    f"@ {target} (type: {a.get('alert_type', '?')})"
+                )
+            await update.message.reply_html("\n".join(lines))
+        except Exception as e:
+            await update.message.reply_text(f"Failed: {e}")
+
+    async def _handle_feeclaims(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show recent Pump.fun fee-claim events."""
+        if not self._is_authorized(update):
+            return
+        bot_ref = getattr(self.callback_router, "bot_ref", None) if self.callback_router else None
+        agg = getattr(bot_ref, "feeclaim_aggregator", None) if bot_ref else None
+        if not agg:
+            await update.message.reply_text("Fee-claim listener not configured.")
+            return
+        events = agg.get_recent_events(limit=10)
+        if not events:
+            await update.message.reply_text("No recent fee-claim events.")
+            return
+        lines = ["<b>💸 Recent Fee Claims:</b>"]
+        for e in events:
+            lines.append(
+                f"<code>{e.mint[:8]}...</code> {e.distributed_sol:.3f} SOL "
+                f"({len(e.shareholders)} holders)"
+            )
+        await update.message.reply_html("\n".join(lines))

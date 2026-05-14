@@ -67,3 +67,22 @@ class TunerRecommendation(BaseModel):
     expected_impact: str
     confidence: float = Field(ge=0, le=1)
     warning_flags: list[str] = []
+
+
+class MemeQualityScore(BaseModel):
+    """LLM-evaluated meme quality. Phase 10.6."""
+
+    overall_score: int = Field(ge=0, le=100, description="Overall quality 0-100")
+    visual_clarity: int = Field(ge=0, le=10)
+    memetic_potential: int = Field(ge=0, le=10)
+    cultural_fit: int = Field(ge=0, le=10)
+    originality: int = Field(ge=0, le=10)
+    community_signal: int = Field(ge=0, le=10)
+    is_clone: bool = Field(description="Likely copycat of a trending token?")
+    cultural_reference: str = Field(
+        default="", description="What zeitgeist/meme it references, if any"
+    )
+    risks: list[str] = Field(
+        default_factory=list, description="Specific risks identified"
+    )
+    reasoning: str = Field(description="Brief one-paragraph explanation")

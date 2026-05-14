@@ -201,6 +201,38 @@ class Settings(BaseSettings):
     # --- Cross-ref feature flag (Phase 9) ---
     crossref_validation_enabled: bool = True
 
+    # --- Phase 10: Strategy hot-reload ---
+    strategy_cache_ttl_seconds: int = 5
+    strategy_enable_db_override: bool = True  # if false, always use env
+
+    # --- Phase 10: Dip-buy mode ---
+    dip_buy_default_expires_hours: int = 24
+    dip_buy_check_interval_seconds: int = 30
+    dip_buy_max_pending_alerts: int = 50
+
+    # --- Phase 10.6: Meme Quality Scorer (AI) ---
+    ai_meme_quality_enabled: bool = False
+    meme_quality_cache_ttl_seconds: int = 300
+    meme_quality_min_score_to_boost: int = 60  # below this, no bonus added
+    meme_quality_score_max_bonus: float = 10.0  # max +10 to scoring engine
+
+    # --- Phase 10.6: Fibonacci Entry Helper ---
+    fib_entry_enabled: bool = False
+    fib_entry_default_timeframe: str = "5m"
+    fib_entry_lookback_periods: int = 100
+    fib_entry_target_level: str = "0.786"
+    fib_entry_min_drop_pct: float = 5.0
+    fib_entry_min_swing_ratio: float = 1.5
+
+    # --- Phase 10: Pump.fun fee-claim WebSocket listener ---
+    feeclaim_enabled: bool = True
+    feeclaim_min_sol: float = 0.5
+    feeclaim_dedup_window_minutes: int = 10
+
+    # --- Phase 10.5: Trader filters bundle (anti-bundler + global fee + funded-from + holder balance) ---
+    trader_filters_enabled: bool = True
+    trader_filters_hard_reject_enabled: bool = True  # if false, bundler/wash → score penalty only, not hard reject
+
     @field_validator("helius_rpc_url", "helius_wss_url", mode="after")
     @classmethod
     def strip_trailing_slash(cls, v: str) -> str:

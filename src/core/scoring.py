@@ -102,6 +102,32 @@ class TokenData:
     fud_detected: bool = False
     fud_severity: str = ""                     # "high", "medium", "low", ""
 
+    # Phase 10.5: Trader filters bundle (composite from 4 analyzers)
+    trader_composite_score: float = 0.0        # -20 to +20, composite from TraderSignalAggregator
+    trader_hard_reject: bool = False           # bundler CONFIRMED or fee WASH_TRADING
+    trader_reject_reason: str = ""             # human-readable rejection cause
+    bundler_pattern_strength: str = "NONE"     # NONE | SUSPICIOUS | CONFIRMED
+    fee_analysis_label: str = "UNKNOWN"        # ORGANIC | SUSPICIOUS | WASH_TRADING | UNUSUAL | UNKNOWN
+    funded_from_label: str = "UNKNOWN"         # SAFE | CAUTION | RED_FLAG | UNKNOWN
+    holder_balance_label: str = "UNKNOWN"      # STRONG | MIXED | WEAK | UNKNOWN
+
+    # Phase 10.6: LLM meme quality score
+    meme_quality_score: int = 0                # 0-100 from LLM
+    meme_quality_bonus: float = 0.0            # -5 to +10 derived score adjustment
+    meme_is_clone: bool = False
+    meme_cultural_reference: str = ""
+
+    # Phase 10.6: Fibonacci entry recommendation
+    fib_recommendation: str = ""               # ENTER_NOW | WAIT_FOR_DIP | OUT_OF_RANGE | NO_DATA
+    fib_target_price_usd: float | None = None
+    fib_distance_to_target_pct: float = 0.0
+    fib_should_wait: bool = False
+
+    # Phase 10: Pump.fun fee-claim signal
+    fee_claim_signal: bool = False             # token had recent fee distribution event
+    fee_claim_distributed_sol: float = 0.0     # SOL distributed in last claim
+    fee_claim_smart_shareholders: int = 0      # how many smart wallets among shareholders
+
 
 @dataclass
 class ScoreBreakdown:
@@ -125,6 +151,16 @@ class ScoreBreakdown:
     narrative_bonus: float = 0.0
     crossref_bonus: float = 0.0
 
+    # Phase 10.5: Trader filters composite (anti-bundler + global fee + funded-from + holder balance)
+    trader_composite_bonus: float = 0.0        # -20 to +20
+
+    # Phase 10.6: AI meme quality + Fibonacci timing
+    meme_quality_bonus: float = 0.0            # -5 to +10
+    fib_timing_bonus: float = 0.0              # -2 to +3 (penalty if late-entry, bonus if at fib)
+
+    # Phase 10: Pump.fun fee-claim bonus
+    fee_claim_bonus: float = 0.0               # 0 to +15 (strong organic-holder signal)
+
     def total(self) -> float:
         return (
             self.smart_money
@@ -140,6 +176,10 @@ class ScoreBreakdown:
             + self.pumpfun_bonus
             + self.narrative_bonus
             + self.crossref_bonus
+            + self.trader_composite_bonus
+            + self.meme_quality_bonus
+            + self.fib_timing_bonus
+            + self.fee_claim_bonus
         )
 
 
@@ -174,6 +214,11 @@ class ScoreResult:
                 "pumpfun_bonus": round(self.breakdown.pumpfun_bonus, 2),
                 "narrative_bonus": round(self.breakdown.narrative_bonus, 2),
                 "crossref_bonus": round(self.breakdown.crossref_bonus, 2),
+                # Phase 10
+                "trader_composite_bonus": round(self.breakdown.trader_composite_bonus, 2),
+                "meme_quality_bonus": round(self.breakdown.meme_quality_bonus, 2),
+                "fib_timing_bonus": round(self.breakdown.fib_timing_bonus, 2),
+                "fee_claim_bonus": round(self.breakdown.fee_claim_bonus, 2),
             },
             "context": {
                 "mcap_usd": self.token.mcap_usd,
@@ -194,6 +239,19 @@ class ScoreResult:
                 "coingecko_rank": self.token.coingecko_rank,
                 "fud_detected": self.token.fud_detected,
                 "fud_severity": self.token.fud_severity,
+                # Phase 10
+                "trader_composite_score": self.token.trader_composite_score,
+                "trader_hard_reject": self.token.trader_hard_reject,
+                "bundler_pattern_strength": self.token.bundler_pattern_strength,
+                "fee_analysis_label": self.token.fee_analysis_label,
+                "funded_from_label": self.token.funded_from_label,
+                "holder_balance_label": self.token.holder_balance_label,
+                "meme_quality_score": self.token.meme_quality_score,
+                "meme_is_clone": self.token.meme_is_clone,
+                "fib_recommendation": self.token.fib_recommendation,
+                "fib_target_price_usd": self.token.fib_target_price_usd,
+                "fee_claim_signal": self.token.fee_claim_signal,
+                "fee_claim_distributed_sol": self.token.fee_claim_distributed_sol,
             },
         }
 
@@ -285,6 +343,10 @@ class ScoringEngine:
         # Phase 9: High-severity FUD detected (hack/exploit/SEC lawsuit) → veto
         if t.fud_detected and t.fud_severity == "high":
             reasons.append("fud_event_high_severity")
+
+        # Phase 10.5: Trader signal hard reject (bundler CONFIRMED or wash trading)
+        if t.trader_hard_reject:
+            reasons.append(f"trader_filter_veto ({t.trader_reject_reason})")
 
         if t.mcap_usd > self.max_mcap_usd:
             reasons.append(f"mcap_too_high (${t.mcap_usd:.0f} > ${self.max_mcap_usd:.0f})")
@@ -508,6 +570,84 @@ class ScoringEngine:
         """
         return max(-5.0, min(15.0, t.crossref_bonus))
 
+    # ------------------------------------------------------------------
+    # Phase 10.5: Trader filters composite
+    # ------------------------------------------------------------------
+
+    def _score_trader_composite(self, t: TokenData) -> float:
+        """Trader filters composite (-20 to +20), already computed by aggregator."""
+        return max(-20.0, min(20.0, t.trader_composite_score))
+
+    # ------------------------------------------------------------------
+    # Phase 10.6: AI meme quality + Fibonacci timing
+    # ------------------------------------------------------------------
+
+    def _score_meme_quality(self, t: TokenData) -> float:
+        """
+        LLM-evaluated meme quality bonus.
+
+        Maps overall_score 0-100 → -5..+10:
+          - >= 80: +10 (excellent meme)
+          - 70-79: +6
+          - 60-69: +3 (above threshold)
+          - 40-59: 0 (neutral)
+          - 20-39: -3
+          - < 20:  -5 (poor / clone)
+        Subtract additional -3 if is_clone=True (regardless of score).
+        """
+        if t.meme_quality_score == 0:
+            return 0.0  # not scored yet, neutral
+        s = t.meme_quality_score
+        if s >= 80:
+            bonus = 10.0
+        elif s >= 70:
+            bonus = 6.0
+        elif s >= 60:
+            bonus = 3.0
+        elif s >= 40:
+            bonus = 0.0
+        elif s >= 20:
+            bonus = -3.0
+        else:
+            bonus = -5.0
+        if t.meme_is_clone:
+            bonus -= 3.0
+        return max(-5.0, min(10.0, bonus))
+
+    def _score_fib_timing(self, t: TokenData) -> float:
+        """
+        Fibonacci entry timing penalty/bonus.
+
+        - ENTER_NOW (price already at fib target): +3 (great entry)
+        - WAIT_FOR_DIP (need to wait): 0 (will store as price alert instead)
+        - OUT_OF_RANGE (too late, far past fib): -2 (chasing the pump)
+        - NO_DATA / empty: 0
+        """
+        rec = t.fib_recommendation
+        if rec == "ENTER_NOW":
+            return 3.0
+        if rec == "OUT_OF_RANGE":
+            return -2.0
+        return 0.0
+
+    def _score_fee_claim(self, t: TokenData) -> float:
+        """
+        Pump.fun fee-claim signal bonus.
+
+        Strong signal that token has real holders earning fees (not pure pump-dump):
+        - Base bonus: +5 if fee_claim_signal=True
+        - +2 per 1 SOL distributed (capped at +5)
+        - +5 if smart wallets among shareholders (real conviction)
+        Total capped at +15.
+        """
+        if not t.fee_claim_signal:
+            return 0.0
+        bonus = 5.0
+        bonus += min(5.0, t.fee_claim_distributed_sol * 2.0)
+        if t.fee_claim_smart_shareholders > 0:
+            bonus += 5.0
+        return min(15.0, bonus)
+
     def _penalty_bundle(self, t: TokenData) -> float:
         """Bundle/insider penalty (negative score)."""
         if t.bundle_supply_pct <= 5:
@@ -552,6 +692,13 @@ class ScoringEngine:
             # Phase 9: narrative + cross-reference bonuses
             narrative_bonus=self._score_narrative(token),
             crossref_bonus=self._score_crossref(token),
+            # Phase 10.5: Trader filters composite
+            trader_composite_bonus=self._score_trader_composite(token),
+            # Phase 10.6: AI meme quality + Fibonacci timing
+            meme_quality_bonus=self._score_meme_quality(token),
+            fib_timing_bonus=self._score_fib_timing(token),
+            # Phase 10: Pump.fun fee-claim
+            fee_claim_bonus=self._score_fee_claim(token),
         )
 
         total = breakdown.total()

@@ -26,8 +26,11 @@ from src.core.scoring import ScoreResult, ScoringEngine, TokenData
 from src.infra.logger import get_logger
 
 if TYPE_CHECKING:
+    from src.ai.meme_quality_scorer import MemeQualityScorer
     from src.clients.geckoterminal import GeckoTerminalClient
     from src.clients.gmgn import GMGNClient
+    from src.core.fib_entry_calculator import FibEntryCalculator
+    from src.core.price_alerts import PriceAlertManager
     from src.core.scanner import TokenScanner
     from src.core.smart_wallet_registry import SmartWalletRegistry
     from src.intel.cluster_detector import ClusterDetector
@@ -37,6 +40,8 @@ if TYPE_CHECKING:
     from src.intel.pumpfun_tracker import PumpfunTracker
     from src.intel.smart_money import SmartMoneyAggregator
     from src.intel.token_verifier import TokenVerifier
+    from src.intel.trader_signal_aggregator import TraderSignalAggregator
+    from src.signals.feeclaim_aggregator import FeeClaimAggregator
 
 log = get_logger(__name__)
 
@@ -59,6 +64,15 @@ class SignalEngine:
         macro_detector: "MacroRegimeDetector | None" = None,
         news_aggregator: "NewsAggregator | None" = None,
         crossref_validator: "CrossRefValidator | None" = None,
+        # Phase 10.5: trader filters bundle
+        trader_signal_aggregator: "TraderSignalAggregator | None" = None,
+        # Phase 10.6: AI meme + Fibonacci
+        meme_scorer: "MemeQualityScorer | None" = None,
+        fib_calculator: "FibEntryCalculator | None" = None,
+        # Phase 10: Pump.fun fee-claim aggregator
+        feeclaim_aggregator: "FeeClaimAggregator | None" = None,
+        # Phase 10: dip-buy price alerts
+        price_alert_manager: "PriceAlertManager | None" = None,
     ) -> None:
         self.scanner = scanner
         self.gmgn = gmgn
@@ -76,6 +90,13 @@ class SignalEngine:
         self.macro_detector = macro_detector
         self.news_aggregator = news_aggregator
         self.crossref_validator = crossref_validator
+
+        # Phase 10 intel layer (optional — degrades gracefully)
+        self.trader_signal_aggregator = trader_signal_aggregator
+        self.meme_scorer = meme_scorer
+        self.fib_calculator = fib_calculator
+        self.feeclaim_aggregator = feeclaim_aggregator
+        self.price_alert_manager = price_alert_manager
 
         # Cached macro regime per-cycle (avoid duplicate API calls across candidates)
         self._cycle_macro: dict | None = None
@@ -151,7 +172,7 @@ class SignalEngine:
         # Phase 9: Apply cycle-level macro context to every candidate
         self._apply_macro_context(token)
 
-        # Parallel enrichment: legacy GMGN + Phase 7 intel + Phase 9 narrative/crossref
+        # Parallel enrichment: legacy GMGN + Phase 7 intel + Phase 9 + Phase 10
         await asyncio.gather(
             self._enrich_gmgn_legacy(token, smart_addresses),
             self._enrich_smart_money(token),
@@ -160,6 +181,13 @@ class SignalEngine:
             self._enrich_pumpfun(token),
             self._enrich_narrative(token),
             self._enrich_crossref(token),
+            # Phase 10.5: Trader filters bundle
+            self._enrich_trader_signals(token),
+            # Phase 10.6: AI meme quality + Fibonacci timing
+            self._enrich_meme_quality(token),
+            self._enrich_fib_entry(token),
+            # Phase 10: Pump.fun fee-claim signal cross-reference
+            self._enrich_fee_claim(token),
             return_exceptions=True,
         )
 
@@ -313,3 +341,85 @@ class SignalEngine:
             token.crossref_bonus = result.cross_ref_bonus
         except Exception as e:
             log.debug("crossref_enrich_failed", token=token.address[:8], error=str(e))
+
+    # ------------------------------------------------------------------
+    # Phase 10: Trader filters + AI meme + Fibonacci + Fee-claim enrichment
+    # ------------------------------------------------------------------
+
+    async def _enrich_trader_signals(self, token: TokenData) -> None:
+        """Phase 10.5: Trader filter bundle (anti-bundler + global fee + funded-from + holder balance)."""
+        if not self.trader_signal_aggregator or not getattr(settings, "trader_filters_enabled", True):
+            return
+        try:
+            result = await self.trader_signal_aggregator.analyze(token.address)
+            token.trader_composite_score = result.composite_score
+            token.trader_hard_reject = result.hard_reject
+            if result.hard_reject and result.reasoning:
+                token.trader_reject_reason = result.reasoning[0] if isinstance(result.reasoning, list) else str(result.reasoning)
+            token.bundler_pattern_strength = result.bundler.strength
+            token.fee_analysis_label = result.fee_analysis.label
+            token.funded_from_label = result.funded_from.label
+            token.holder_balance_label = result.holder_balance.label
+        except Exception as e:
+            log.debug("trader_signals_enrich_failed", token=token.address[:8], error=str(e))
+
+    async def _enrich_meme_quality(self, token: TokenData) -> None:
+        """Phase 10.6: LLM-evaluated meme quality."""
+        if not self.meme_scorer or not getattr(settings, "ai_meme_quality_enabled", False):
+            return
+        try:
+            score = await self.meme_scorer.score({
+                "address": token.address,
+                "name": token.name,
+                "symbol": token.symbol,
+                "description": "",  # not currently in TokenData, could enrich from gmgn
+                "socials": {},
+                "narrative_match": token.narrative_match,
+                "mcap_usd": token.mcap_usd,
+                "holder_count": token.holder_count,
+            })
+            if score is not None:
+                token.meme_quality_score = score.overall_score
+                token.meme_is_clone = score.is_clone
+                token.meme_cultural_reference = score.cultural_reference
+        except Exception as e:
+            log.debug("meme_quality_enrich_failed", token=token.address[:8], error=str(e))
+
+    async def _enrich_fib_entry(self, token: TokenData) -> None:
+        """Phase 10.6: Fibonacci 0.786 retracement entry recommendation."""
+        if not self.fib_calculator or not getattr(settings, "fib_entry_enabled", False):
+            return
+        if token.price_usd <= 0:
+            return  # need current price
+        try:
+            suggestion = await self.fib_calculator.suggest_fib_entry(
+                token_address=token.address,
+                current_price=token.price_usd,
+                min_drop_pct=getattr(settings, "fib_entry_min_drop_pct", 5.0),
+            )
+            if suggestion:
+                recommendation, target_price, reasoning = suggestion
+                token.fib_recommendation = recommendation
+                token.fib_target_price_usd = target_price
+                token.fib_should_wait = recommendation == "WAIT_FOR_DIP"
+                if target_price and token.price_usd > 0:
+                    token.fib_distance_to_target_pct = ((target_price - token.price_usd) / token.price_usd) * 100
+        except Exception as e:
+            log.debug("fib_enrich_failed", token=token.address[:8], error=str(e))
+
+    async def _enrich_fee_claim(self, token: TokenData) -> None:
+        """Phase 10: Pump.fun fee-claim cross-reference (token had recent fee distribution event)."""
+        if not self.feeclaim_aggregator:
+            return
+        try:
+            event = self.feeclaim_aggregator.get_event_for_mint(token.address)
+            if event:
+                token.fee_claim_signal = True
+                token.fee_claim_distributed_sol = float(event.distributed_sol)
+                # Cross-reference shareholders against smart wallet registry
+                if self.registry and event.shareholders:
+                    smart_addresses = {w.address for w in self.registry.get_active_wallets()}
+                    holder_pubkeys = {s.get("pubkey", "") for s in event.shareholders}
+                    token.fee_claim_smart_shareholders = len(holder_pubkeys & smart_addresses)
+        except Exception as e:
+            log.debug("fee_claim_enrich_failed", token=token.address[:8], error=str(e))

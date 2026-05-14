@@ -69,6 +69,22 @@ from src.intel.crossref_validator import CrossRefValidator
 from src.intel.macro_regime import MacroRegimeDetector
 from src.intel.news_aggregator import NewsAggregator
 
+# Phase 10: Charon parity + trader filters + AI quality
+from src.ai.llm_client import LLMClient
+from src.ai.meme_quality_scorer import MemeQualityScorer
+from src.ai.meme_score_cache import MemeScoreCache
+from src.core.fib_entry_calculator import FibEntryCalculator
+from src.core.price_alerts import PriceAlertManager
+from src.core.strategy_manager import StrategyManager
+from src.infra.telegram_callbacks import CallbackRouter
+from src.intel.bundler_pattern_detector import BundlerPatternDetector
+from src.intel.global_fee_analyzer import GlobalFeeAnalyzer
+from src.intel.top_holder_balance_check import TopHolderBalanceChecker
+from src.intel.trader_signal_aggregator import TraderSignalAggregator
+from src.intel.wallet_funded_analyzer import WalletFundedAnalyzer
+from src.signals.feeclaim_aggregator import FeeClaimAggregator
+from src.signals.pumpfun_feeclaim import PumpfunFeeClaimListener
+
 log = get_logger(__name__)
 
 
@@ -110,6 +126,17 @@ class Bot:
         self.macro_detector: MacroRegimeDetector | None = None
         self.news_aggregator: NewsAggregator | None = None
         self.crossref_validator: CrossRefValidator | None = None
+
+        # Phase 10: Charon parity + trader filters + AI quality
+        self.strategy_manager = None
+        self.price_alert_manager = None
+        self.feeclaim_listener = None
+        self.feeclaim_aggregator = None
+        self.trader_signal_aggregator = None
+        self.meme_scorer = None
+        self.meme_cache = None
+        self.fib_calculator = None
+        self.callback_router = None
 
         # Infra
         self.db: Database | None = None
@@ -274,6 +301,86 @@ class Bot:
         else:
             log.info("crossref_validator_disabled", note="No CoinGecko or Messari key — cross-ref off")
 
+        # Phase 10: Strategy Manager (hot-reloadable strategies from DB)
+        if getattr(settings, "strategy_enable_db_override", True):
+            self.strategy_manager = StrategyManager(db=self.db)
+            try:
+                active = await self.strategy_manager.get_active()
+                if active:
+                    log.info("strategy_manager_active", strategy=active.get("id"))
+                else:
+                    log.warning("strategy_manager_no_active", note="Run migration 002_strategies.sql first")
+            except Exception as e:
+                log.warning("strategy_manager_init_failed", error=str(e))
+                self.strategy_manager = None
+
+        # Phase 10: Dip-buy price alert manager
+        if self.gecko:
+            async def _on_alert_trigger(mint: str, signal_data: dict) -> None:
+                """Re-process a previously stored candidate when its price alert fires."""
+                try:
+                    if self.signal:
+                        await self.signal.evaluate_cycle(max_candidates=5)
+                except Exception as e:
+                    log.warning("price_alert_trigger_failed", mint=mint[:8], error=str(e))
+            self.price_alert_manager = PriceAlertManager(
+                db=self.db, gecko=self.gecko, on_trigger_callback=_on_alert_trigger,
+            )
+
+        # Phase 10: Pump.fun fee-claim listener (background WebSocket)
+        if settings.helius_api_key and getattr(settings, "feeclaim_enabled", True):
+            try:
+                async def _on_feeclaim(event) -> None:
+                    if self.feeclaim_aggregator:
+                        await self.feeclaim_aggregator._on_fee_claim(event)
+                self.feeclaim_listener = PumpfunFeeClaimListener(
+                    helius_ws_url=f"wss://mainnet.helius-rpc.com/?api-key={settings.helius_api_key}",
+                    on_fee_claim_callback=_on_feeclaim,
+                )
+                self.feeclaim_aggregator = FeeClaimAggregator(
+                    listener=self.feeclaim_listener,
+                    signal_engine=None,  # wired post-signal-creation
+                    registry=self.registry,
+                )
+                log.info("feeclaim_listener_initialized")
+            except Exception as e:
+                log.warning("feeclaim_init_failed", error=str(e))
+
+        # Phase 10.5: Trader filter aggregator (anti-bundler + global fee + funded + holder balance)
+        if getattr(settings, "trader_filters_enabled", True) and self.birdeye and self.rpc:
+            try:
+                bundler_det = BundlerPatternDetector(birdeye=self.birdeye, helius_rpc=self.rpc)
+                fee_analyzer = GlobalFeeAnalyzer(dexscreener=self.dexscreener, birdeye=self.birdeye)
+                funded_analyzer = WalletFundedAnalyzer(helius_rpc=self.rpc, birdeye=self.birdeye)
+                balance_checker = TopHolderBalanceChecker(helius_rpc=self.rpc, birdeye=self.birdeye)
+                self.trader_signal_aggregator = TraderSignalAggregator(
+                    bundler_detector=bundler_det,
+                    fee_analyzer=fee_analyzer,
+                    funded_analyzer=funded_analyzer,
+                    balance_checker=balance_checker,
+                )
+                log.info("trader_signal_aggregator_initialized")
+            except Exception as e:
+                log.warning("trader_aggregator_init_failed", error=str(e))
+
+        # Phase 10.6: AI meme quality scorer (optional, off by default)
+        if getattr(settings, "ai_meme_quality_enabled", False) and settings.openrouter_api_key:
+            try:
+                llm = LLMClient()
+                self.meme_cache = MemeScoreCache(cache=cache)
+                self.meme_scorer = MemeQualityScorer(llm_client=llm, cache=self.meme_cache)
+                log.info("meme_scorer_initialized")
+            except Exception as e:
+                log.warning("meme_scorer_init_failed", error=str(e))
+
+        # Phase 10.6: Fibonacci entry calculator
+        if getattr(settings, "fib_entry_enabled", False) and self.gecko:
+            try:
+                self.fib_calculator = FibEntryCalculator(gecko=self.gecko)
+                log.info("fib_calculator_initialized")
+            except Exception as e:
+                log.warning("fib_calculator_init_failed", error=str(e))
+
         # Signal engine with intel layer
         self.signal = SignalEngine(
             scanner=self.scanner,
@@ -289,6 +396,12 @@ class Bot:
             macro_detector=self.macro_detector,
             news_aggregator=self.news_aggregator,
             crossref_validator=self.crossref_validator,
+            # Phase 10: trader filters + AI quality + Fibonacci + fee-claim + dip-buy
+            trader_signal_aggregator=self.trader_signal_aggregator,
+            meme_scorer=self.meme_scorer,
+            fib_calculator=self.fib_calculator,
+            feeclaim_aggregator=self.feeclaim_aggregator,
+            price_alert_manager=self.price_alert_manager,
         )
 
         # Execution + position manager
@@ -325,12 +438,23 @@ class Bot:
             max_wallets=100,
         )
 
+        # Phase 10: Build CallbackRouter (handles inline keyboard button presses)
+        try:
+            self.callback_router = CallbackRouter(bot_ref=self)
+            log.info("callback_router_initialized")
+        except Exception as e:
+            log.warning("callback_router_init_failed", error=str(e))
+            self.callback_router = None
+
         # Telegram (paling terakhir, perlu reference komponen lain)
         self.telegram = TelegramBot(
             registry=self.registry,
             cb=self.cb,
             position_manager=self.position_manager,
             db=self.db,
+            callback_router=self.callback_router,
+            strategy_manager=self.strategy_manager,
+            price_alert_manager=self.price_alert_manager,
         )
         # Wire balik telegram ke cb dan position_manager untuk alerts
         self.cb.telegram = self.telegram
@@ -551,6 +675,32 @@ class Bot:
                 self._tasks.append(asyncio.create_task(self.tracker.run()))
             else:
                 log.warning("tracker_skipped_no_wallets")
+
+        # Phase 10: Pump.fun fee-claim WebSocket listener (4th independent signal source)
+        if self.feeclaim_listener:
+            self._tasks.append(asyncio.create_task(self.feeclaim_listener.run()))
+            log.info("feeclaim_listener_running")
+
+        # Phase 10: Dip-buy price alert checker (poll pending alerts every 30s)
+        if self.price_alert_manager:
+            async def _price_alert_loop() -> None:
+                while not self._shutdown_event.is_set():
+                    try:
+                        await asyncio.wait_for(
+                            self._shutdown_event.wait(),
+                            timeout=getattr(settings, "dip_buy_check_interval_seconds", 30),
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                    try:
+                        triggered = await self.price_alert_manager.check_pending()
+                        if triggered > 0:
+                            log.info("price_alerts_triggered", count=triggered)
+                    except Exception as e:
+                        log.warning("price_alert_loop_error", error=str(e))
+            self._tasks.append(asyncio.create_task(_price_alert_loop()))
+            log.info("price_alert_loop_running")
 
         # Telegram
         if self.telegram:
