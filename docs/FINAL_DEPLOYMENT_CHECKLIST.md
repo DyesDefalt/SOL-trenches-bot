@@ -18,8 +18,11 @@ Status: **All phases done.** This is the go-live checklist.
 | GMGN swap alternative | 7g | ✅ |
 | Production polish (health endpoint, Prometheus, systemd watchdog) | 8 | ✅ |
 | Extended intelligence (CryptoQuant+AlphaVantage+CryptoPanic+Messari+CoinGecko+Tokito) | 9 | ✅ |
+| Charon parity (hot-reload strategies, fee-claim WS, dip-buy mode, interactive menus) | 10 | ✅ |
+| Trader filters bundle (anti-bundler + global fee + funded-from + holder balance) | 10.5 | ✅ |
+| AI Meme Quality Scorer + Fibonacci 0.786 entry helper | 10.6 | ✅ |
 
-**Total: 327 unit tests pass.**
+**Total: 494 unit tests pass.**
 
 ## Pre-Flight Checklist
 
@@ -66,6 +69,8 @@ Status: **All phases done.** This is the go-live checklist.
 - [ ] `secrets/bot-wallet.json` uploaded with chmod 600
 - [ ] `secrets/gmgn_private.pem` uploaded with chmod 600
 - [ ] `make db-init` ran successfully
+- [ ] `make db-migrate-phase10` ran successfully (strategies + price_alerts tables seeded)
+- [ ] `make list-strategies` shows 4 strategies (conservative, balanced=active, aggressive, dip_buy)
 
 ### Smoke Tests
 
@@ -164,11 +169,61 @@ FROM positions
 WHERE exit_timestamp >= NOW() - INTERVAL '7 days' AND status = 'CLOSED';
 ```
 
+## Phase 10 Operations (Hot-Reload Strategies + New Telegram)
+
+### Switching Strategies Without Restart
+
+Via Telegram (no SSH needed):
+```
+/strategy                          # list all 4 strategies with active marker
+/strategy dip_buy                  # activate dip_buy (or balanced/aggressive/conservative)
+/stratset dip_buy tp1_gain_pct 50  # change one param, applies on next signal cycle
+/menu                              # open interactive inline-keyboard menu
+```
+
+Via SQL:
+```sql
+-- Show active strategy + its full config
+SELECT id, name, enabled, config FROM strategies WHERE enabled = TRUE;
+
+-- Update a single param (replaces JSONB key)
+UPDATE strategies 
+SET config = jsonb_set(config, '{hard_sl_pct}', '-20'::jsonb), 
+    updated_at = NOW() 
+WHERE id = 'balanced';
+```
+
+### Monitoring Phase 10 New Signal Sources
+
+```sql
+-- Fee-claim events received in last 24h
+SELECT COUNT(*) FROM signals 
+WHERE context->>'fee_claim_signal' = 'true' 
+  AND timestamp >= NOW() - INTERVAL '24 hours';
+
+-- Pending dip-buy price alerts
+SELECT mint, symbol, strategy_id, alert_type, 
+       target_ath_distance_pct, ROUND((expires_at_ms - EXTRACT(EPOCH FROM NOW())*1000) / 60000) AS minutes_remaining
+FROM price_alerts 
+WHERE status = 'pending' 
+ORDER BY detected_at_ms DESC;
+
+-- Trader filter rejections (anti-bundler veto stats)
+SELECT 
+  context->>'bundler_pattern_strength' AS bundler_strength,
+  context->>'fee_analysis_label' AS fee_label,
+  COUNT(*)
+FROM signals 
+WHERE action = 'REJECT' 
+  AND timestamp >= NOW() - INTERVAL '24 hours'
+GROUP BY 1, 2;
+```
+
 ## Reference Docs
 
 - `docs/phase-0-setup.md` — Initial VPS + account setup
 - `docs/PHASE_7_QUICK_REFERENCE.md` — Multi-source intel layer reference
-- `README.md` — Project overview + quick start
+- `README.md` — Project overview + quick start + Phase 10 details
 - This file — Final deployment checklist
 
 ## Emergency Procedures

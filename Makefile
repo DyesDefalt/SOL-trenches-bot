@@ -1,36 +1,48 @@
-.PHONY: help install install-dev test lint format type-check smoke clean run-dev gmgn-keygen wallet-gen bootstrap-wallets refresh-wallets list-wallets stats-wallets backtest backtest-cached run db-init deploy
+.PHONY: help install install-dev test lint format type-check smoke clean run-dev gmgn-keygen wallet-gen bootstrap-wallets refresh-wallets list-wallets stats-wallets backtest backtest-cached run db-init db-migrate-phase10 list-strategies show-pending-alerts deploy phase9-smoke intel-smoke nansen-discover tuner-run health-check metrics ai-cost
 
 help:
 	@echo "Solana Sniper Bot — Make targets:"
 	@echo ""
 	@echo "Setup:"
-	@echo "  install            Install runtime deps"
-	@echo "  install-dev        Install + dev deps (pytest, ruff, mypy)"
-	@echo "  gmgn-keygen        Generate Ed25519 keypair untuk GMGN"
-	@echo "  wallet-gen         Generate Solana hot wallet baru"
-	@echo "  db-init            Run Postgres schema migration"
-	@echo "  deploy             Run deploy/install.sh untuk VPS production"
+	@echo "  install              Install runtime deps"
+	@echo "  install-dev          Install + dev deps (pytest, ruff, mypy)"
+	@echo "  gmgn-keygen          Generate Ed25519 keypair untuk GMGN"
+	@echo "  wallet-gen           Generate Solana hot wallet baru"
+	@echo "  db-init              Run base Postgres schema migration (001)"
+	@echo "  db-migrate-phase10   Run Phase 10 migrations (strategies + price_alerts)"
+	@echo "  deploy               Run deploy/install.sh untuk VPS production"
 	@echo ""
 	@echo "Smart Wallet Registry:"
-	@echo "  bootstrap-wallets  Discovery dari nol — 200 candidate, ~60 detik"
-	@echo "  refresh-wallets    Re-classify existing + add new (run via cron tiap 6 jam)"
-	@echo "  list-wallets       Tampilkan semua active smart wallets"
-	@echo "  stats-wallets      Quick stats per tier"
+	@echo "  bootstrap-wallets    Discovery dari nol — 200 candidate, ~60 detik"
+	@echo "  refresh-wallets      Re-classify existing + add new (run via cron tiap 6 jam)"
+	@echo "  list-wallets         Tampilkan semua active smart wallets"
+	@echo "  stats-wallets        Quick stats per tier"
+	@echo ""
+	@echo "Phase 10 Strategy Mgmt:"
+	@echo "  list-strategies      Show all strategies with enabled flag"
+	@echo "  show-pending-alerts  Show dip-buy price alerts waiting for trigger"
 	@echo ""
 	@echo "Backtest:"
-	@echo "  backtest           Full backtest: fetch data + replay + decision gate"
-	@echo "  backtest-cached    Replay pakai data cache yang sudah ada (lebih cepat)"
+	@echo "  backtest             Full backtest: fetch data + replay + decision gate"
+	@echo "  backtest-cached      Replay pakai data cache yang sudah ada (lebih cepat)"
+	@echo ""
+	@echo "Smoke tests:"
+	@echo "  smoke                Phase 1-5 smoke test (11 sources)"
+	@echo "  intel-smoke          Phase 7 intel layer smoke test"
+	@echo "  phase9-smoke         Phase 9 extended intel smoke test"
 	@echo ""
 	@echo "Run:"
-	@echo "  run                Run bot (foreground, untuk dev/testing)"
+	@echo "  run                  Run bot (foreground, untuk dev/testing)"
+	@echo "  health-check         Curl /health endpoint"
+	@echo "  metrics              Curl /metrics endpoint"
 	@echo ""
 	@echo "Dev:"
-	@echo "  test               Run pytest unit tests (72 tests)"
-	@echo "  smoke              Smoke test live API (Helius, GMGN, GeckoTerminal)"
-	@echo "  lint               Ruff lint check"
-	@echo "  format             Ruff format apply"
-	@echo "  type-check         Mypy strict check"
-	@echo "  clean              Remove cache, build, venv"
+	@echo "  test                 Run pytest unit tests (494 tests)"
+	@echo "  lint                 Ruff lint check"
+	@echo "  format               Ruff format apply"
+	@echo "  type-check           Mypy strict check"
+	@echo "  ai-cost              Show today's LLM spend"
+	@echo "  clean                Remove cache, build, venv"
 
 install:
 	python3.11 -m venv venv
@@ -96,6 +108,18 @@ run:
 
 db-init:
 	psql -U bot -d solana_bot -f migrations/001_initial.sql
+
+db-migrate-phase10:
+	@echo "Running Phase 10 migrations (strategies + price_alerts)..."
+	psql -U bot -d solana_bot -f migrations/002_strategies.sql
+	psql -U bot -d solana_bot -f migrations/003_price_alerts.sql
+	@echo "Phase 10 migrations done. 4 strategies seeded: conservative, balanced, aggressive, dip_buy"
+
+list-strategies:
+	psql -U bot -d solana_bot -c "SELECT id, name, enabled FROM strategies ORDER BY id;"
+
+show-pending-alerts:
+	psql -U bot -d solana_bot -c "SELECT id, mint, symbol, strategy_id, alert_type, target_ath_distance_pct FROM price_alerts WHERE status='pending' ORDER BY detected_at_ms DESC LIMIT 20;"
 
 deploy:
 	bash deploy/install.sh
