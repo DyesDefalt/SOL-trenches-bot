@@ -54,6 +54,28 @@ class OpenPosition:
     tp3_done: bool = False
     last_price_update: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    # Phase 11.1: per-position overrides (set via Telegram quick-action buttons)
+    # When non-None, these override the global settings.* values for THIS position only.
+    tp_override_pct: float | None = None      # e.g. 25.0 = override next TP to +25%
+    sl_override_pct: float | None = None      # e.g. -15.0 = tighten SL to -15%
+    trail_disabled: bool = False               # if True, skip trailing stop logic
+
+    # Phase 11.3: extended metrics for rich position card (filled on refresh)
+    current_price_usd: float | None = None
+    current_liquidity_usd: float | None = None
+    current_mcap_usd: float | None = None
+    buy_pressure_pct: float | None = None
+    vol_liq_ratio: float | None = None
+    rug_score: int | None = None
+
+    def effective_tp1_pct(self, default: float) -> float:
+        """Return active TP1 % considering override."""
+        return self.tp_override_pct if self.tp_override_pct is not None else default
+
+    def effective_sl_pct(self, default: float) -> float:
+        """Return active SL % considering override."""
+        return self.sl_override_pct if self.sl_override_pct is not None else default
+
 
 class PositionManager:
     """Manage open positions: track price, evaluate exits, execute sells."""
@@ -113,19 +135,25 @@ class PositionManager:
 
         gain_pct = ((current_price_usd - pos.entry_price_usd) / pos.entry_price_usd) * 100
 
-        # 1. Hard SL check (highest priority)
-        if gain_pct <= settings.hard_sl_pct:
+        # Phase 11.1: cache live price metric for /positions display
+        pos.current_price_usd = current_price_usd
+
+        # 1. Hard SL check (highest priority) — honor per-position override
+        sl_threshold = pos.effective_sl_pct(settings.hard_sl_pct)
+        if gain_pct <= sl_threshold:
             await self._exit_full(pos, current_price_usd, "SL")
             return
 
-        # 2. Trailing stop (only after TP3 atau kalau no TP yet)
-        drop_from_peak = ((current_price_usd - pos.peak_price_usd) / pos.peak_price_usd) * 100
-        if pos.tp3_done and drop_from_peak <= -settings.trailing_stop_pct:
-            await self._exit_full(pos, current_price_usd, "TRAILING")
-            return
+        # 2. Trailing stop (only after TP3 atau kalau no TP yet) — skip if trail_disabled override
+        if not pos.trail_disabled:
+            drop_from_peak = ((current_price_usd - pos.peak_price_usd) / pos.peak_price_usd) * 100
+            if pos.tp3_done and drop_from_peak <= -settings.trailing_stop_pct:
+                await self._exit_full(pos, current_price_usd, "TRAILING")
+                return
 
-        # 3. Take profit staircase
-        if not pos.tp1_done and gain_pct >= settings.tp1_gain_pct:
+        # 3. Take profit staircase — honor per-position TP override (applies to TP1 only)
+        tp1_threshold = pos.effective_tp1_pct(settings.tp1_gain_pct)
+        if not pos.tp1_done and gain_pct >= tp1_threshold:
             await self._partial_exit(pos, current_price_usd, "TP1", settings.tp1_sell_pct / 100)
             pos.tp1_done = True
             return
@@ -310,3 +338,119 @@ class PositionManager:
 
             except Exception as e:
                 log.error("position_monitor_error", error=str(e))
+
+    # ------------------------------------------------------------------
+    # Phase 11.1: per-position TP/SL/Trail overrides via Telegram buttons
+    # ------------------------------------------------------------------
+
+    async def override_tp(self, position_id: int, new_tp_pct: float, set_by: str = "telegram") -> bool:
+        """
+        Override TP1 target for a single open position.
+
+        Returns True if applied, False if position not found.
+        """
+        pos = self._find_position_by_db_id(position_id)
+        if not pos:
+            return False
+        pos.tp_override_pct = float(new_tp_pct)
+        # Reset tp1_done so the new lower TP can trigger (only if not already past it)
+        gain_pct = self._current_gain_pct(pos)
+        if gain_pct is not None and gain_pct < new_tp_pct:
+            pos.tp1_done = False
+        try:
+            await self.db.update_position_override(position_id, tp_pct=new_tp_pct, set_by=set_by)
+        except Exception as e:
+            log.warning("override_tp_db_persist_failed", position_id=position_id, error=str(e))
+        log.info("position_tp_override", position_id=position_id, new_pct=new_tp_pct, set_by=set_by)
+        return True
+
+    async def override_sl(self, position_id: int, new_sl_pct: float, set_by: str = "telegram") -> bool:
+        """Override hard SL for a single open position. new_sl_pct should be negative (e.g. -15.0)."""
+        pos = self._find_position_by_db_id(position_id)
+        if not pos:
+            return False
+        pos.sl_override_pct = float(new_sl_pct)
+        try:
+            await self.db.update_position_override(position_id, sl_pct=new_sl_pct, set_by=set_by)
+        except Exception as e:
+            log.warning("override_sl_db_persist_failed", position_id=position_id, error=str(e))
+        log.info("position_sl_override", position_id=position_id, new_pct=new_sl_pct, set_by=set_by)
+        return True
+
+    async def toggle_trail(self, position_id: int, set_by: str = "telegram") -> bool | None:
+        """Toggle trailing stop on/off. Returns new disabled state, or None if position not found."""
+        pos = self._find_position_by_db_id(position_id)
+        if not pos:
+            return None
+        pos.trail_disabled = not pos.trail_disabled
+        try:
+            await self.db.update_position_override(position_id, trail_disabled=pos.trail_disabled, set_by=set_by)
+        except Exception as e:
+            log.warning("toggle_trail_db_persist_failed", position_id=position_id, error=str(e))
+        log.info("position_trail_toggled", position_id=position_id, disabled=pos.trail_disabled, set_by=set_by)
+        return pos.trail_disabled
+
+    async def force_partial_sell(self, position_id: int, sell_pct: float, set_by: str = "telegram") -> bool:
+        """Force-sell sell_pct (0.0-1.0) of remaining tokens. Used by /menu quick-sell buttons."""
+        pos = self._find_position_by_db_id(position_id)
+        if not pos:
+            return False
+        if sell_pct <= 0 or sell_pct > 1:
+            return False
+        # Get latest price first (best-effort)
+        try:
+            token_data = await self.gecko.get_token(pos.token_address)
+            current_price = float(token_data.get("attributes", {}).get("price_usd", 0))
+        except Exception:
+            current_price = pos.current_price_usd or pos.entry_price_usd
+        if current_price <= 0:
+            log.warning("force_sell_no_price", position_id=position_id)
+            return False
+        if sell_pct >= 0.99:
+            await self._exit_full(pos, current_price, f"MANUAL_FULL_{set_by}")
+        else:
+            await self._partial_exit(pos, current_price, f"MANUAL_{int(sell_pct * 100)}PCT_{set_by}", sell_pct)
+        return True
+
+    def _find_position_by_db_id(self, position_id: int) -> OpenPosition | None:
+        """Lookup open position by DB id (positions are keyed by token_address internally)."""
+        for pos in self._positions.values():
+            if pos.db_id == position_id:
+                return pos
+        return None
+
+    def _current_gain_pct(self, pos: OpenPosition) -> float | None:
+        """Best-effort current gain % from cached current_price_usd."""
+        if pos.current_price_usd is None or pos.current_price_usd <= 0:
+            return None
+        return ((pos.current_price_usd - pos.entry_price_usd) / pos.entry_price_usd) * 100
+
+    def get_open_positions_summary(self) -> list[dict]:
+        """Return rich summary of all open positions for /positions display."""
+        out = []
+        for pos in self._positions.values():
+            gain = self._current_gain_pct(pos)
+            out.append({
+                "db_id": pos.db_id,
+                "token_address": pos.token_address,
+                "symbol": pos.token_symbol,
+                "entry_price_usd": pos.entry_price_usd,
+                "current_price_usd": pos.current_price_usd,
+                "peak_price_usd": pos.peak_price_usd,
+                "gain_pct": gain,
+                "size_sol": pos.entry_amount_sol,
+                "tp_active_pct": pos.effective_tp1_pct(settings.tp1_gain_pct),
+                "sl_active_pct": pos.effective_sl_pct(settings.hard_sl_pct),
+                "trail_active": not pos.trail_disabled,
+                "tp_override": pos.tp_override_pct,
+                "sl_override": pos.sl_override_pct,
+                "tp1_done": pos.tp1_done,
+                "tp2_done": pos.tp2_done,
+                "tp3_done": pos.tp3_done,
+                "buy_pressure_pct": pos.buy_pressure_pct,
+                "vol_liq_ratio": pos.vol_liq_ratio,
+                "rug_score": pos.rug_score,
+                "liquidity_usd": pos.current_liquidity_usd,
+                "mcap_usd": pos.current_mcap_usd,
+            })
+        return out

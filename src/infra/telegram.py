@@ -199,6 +199,7 @@ class TelegramBot:
         await update.message.reply_html("\n".join(lines))
 
     async def _handle_pnl(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Phase 11.2: enriched /pnl with exit-reason breakdown + best/worst trade."""
         if not self._is_authorized(update):
             return
 
@@ -206,18 +207,87 @@ class TelegramBot:
             await update.message.reply_text("DB tidak tersedia.")
             return
 
-        days = await self.db.get_daily_pnl(days=7)
-        if not days:
+        # Parse optional --days argument: /pnl 30
+        args = ctx.args or []
+        try:
+            window_days = int(args[0]) if args else 7
+        except (ValueError, IndexError):
+            window_days = 7
+        window_days = max(1, min(365, window_days))
+
+        days = await self.db.get_daily_pnl(days=window_days)
+        breakdown = []
+        bw: dict = {"best": [], "worst": []}
+        try:
+            breakdown = await self.db.get_pnl_breakdown_by_exit_reason(days=window_days)
+            bw = await self.db.get_best_worst_trades(days=window_days, limit=1)
+        except Exception as e:
+            log.warning("pnl_breakdown_query_failed", error=str(e))
+
+        if not days and not breakdown:
             await update.message.reply_text("Belum ada data PnL.")
             return
 
-        lines = ["<b>📈 PNL (7 days)</b>"]
-        for d in days:
-            emoji = "🟢" if float(d["pnl_sol"]) > 0 else "🔴" if float(d["pnl_sol"]) < 0 else "⚪"
+        lines = [f"<b>📈 PnL Summary ({window_days} days)</b>", ""]
+
+        # Daily rolling
+        if days:
+            lines.append("<b>By Day:</b>")
+            total_pnl = 0.0
+            total_trades = 0
+            total_wins = 0
+            for d in days:
+                emoji = "🟢" if float(d["pnl_sol"]) > 0 else "🔴" if float(d["pnl_sol"]) < 0 else "⚪"
+                lines.append(
+                    f"{emoji} {d['date']}: {float(d['pnl_sol']):+.4f} SOL "
+                    f"({d['trades_total']}t, {d['trades_won']}W/{d['trades_lost']}L)"
+                )
+                total_pnl += float(d["pnl_sol"])
+                total_trades += int(d["trades_total"])
+                total_wins += int(d["trades_won"])
+            wr = (total_wins / total_trades * 100) if total_trades > 0 else 0
+            lines.append("")
+            lines.append(f"<b>Total:</b> {total_pnl:+.4f} SOL · {total_trades}t · WR {wr:.1f}%")
+
+        # Phase 11.2: exit reason breakdown
+        if breakdown:
+            lines.append("")
+            lines.append("<b>By Exit Reason:</b>")
+            for row in breakdown:
+                reason = row.get("exit_reason") or "?"
+                count = row.get("count") or 0
+                avg_pct = row.get("avg_pnl_pct") or 0.0
+                total_sol = row.get("total_pnl_sol") or 0.0
+                hold = row.get("avg_hold_minutes") or 0.0
+                emoji = "🟢" if total_sol > 0 else "🔴" if total_sol < 0 else "⚪"
+                lines.append(
+                    f"{emoji} <code>{reason:<14}</code> "
+                    f"{count:>3}t · avg {avg_pct:+6.1f}% · {total_sol:+.4f} SOL · {hold:.0f}m"
+                )
+
+        # Best / worst trade
+        if bw.get("best") or bw.get("worst"):
+            lines.append("")
+        for b in bw.get("best", []):
+            sym = b.get("token_symbol") or (b.get("token_address") or "?")[:8]
             lines.append(
-                f"{emoji} {d['date']}: {float(d['pnl_sol']):+.4f} SOL "
-                f"({d['trades_total']}t, {d['trades_won']}W/{d['trades_lost']}L)"
+                f"🏆 <b>Best:</b> {sym} "
+                f"{float(b.get('realized_pnl_pct') or 0):+.1f}% "
+                f"({float(b.get('realized_pnl_sol') or 0):+.4f} SOL · "
+                f"{float(b.get('hold_minutes') or 0):.0f}m · {b.get('exit_reason') or '?'})"
             )
+        for w in bw.get("worst", []):
+            sym = w.get("token_symbol") or (w.get("token_address") or "?")[:8]
+            lines.append(
+                f"💩 <b>Worst:</b> {sym} "
+                f"{float(w.get('realized_pnl_pct') or 0):+.1f}% "
+                f"({float(w.get('realized_pnl_sol') or 0):+.4f} SOL · "
+                f"{float(w.get('hold_minutes') or 0):.0f}m · {w.get('exit_reason') or '?'})"
+            )
+
+        lines.append("")
+        lines.append("<i>Tip: /pnl 30 → look back 30 days</i>")
+
         await update.message.reply_html("\n".join(lines))
 
     async def _handle_pause(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

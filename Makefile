@@ -1,4 +1,4 @@
-.PHONY: help install install-dev test lint format type-check smoke clean run-dev gmgn-keygen wallet-gen bootstrap-wallets refresh-wallets list-wallets stats-wallets backtest backtest-cached run db-init db-migrate-phase10 list-strategies show-pending-alerts deploy phase9-smoke intel-smoke nansen-discover tuner-run health-check metrics ai-cost
+.PHONY: help install install-dev test lint format type-check smoke clean run-dev gmgn-keygen wallet-gen bootstrap-wallets refresh-wallets list-wallets stats-wallets backtest backtest-cached run db-init db-migrate-phase10 db-migrate-phase11 list-strategies show-pending-alerts show-overrides deploy phase9-smoke intel-smoke nansen-discover tuner-run health-check metrics ai-cost
 
 help:
 	@echo "Solana Sniper Bot — Make targets:"
@@ -10,6 +10,7 @@ help:
 	@echo "  wallet-gen           Generate Solana hot wallet baru"
 	@echo "  db-init              Run base Postgres schema migration (001)"
 	@echo "  db-migrate-phase10   Run Phase 10 migrations (strategies + price_alerts)"
+	@echo "  db-migrate-phase11   Run Phase 11 migrations (trench_low_mcap + position overrides)"
 	@echo "  deploy               Run deploy/install.sh untuk VPS production"
 	@echo ""
 	@echo "Smart Wallet Registry:"
@@ -18,9 +19,11 @@ help:
 	@echo "  list-wallets         Tampilkan semua active smart wallets"
 	@echo "  stats-wallets        Quick stats per tier"
 	@echo ""
-	@echo "Phase 10 Strategy Mgmt:"
+	@echo "Phase 10/11 Strategy & Position Mgmt:"
 	@echo "  list-strategies      Show all strategies with enabled flag"
 	@echo "  show-pending-alerts  Show dip-buy price alerts waiting for trigger"
+	@echo "  show-overrides       Show open positions with active TP/SL/Trail overrides"
+	@echo "  pnl-30d              30-day PnL breakdown by exit reason"
 	@echo ""
 	@echo "Backtest:"
 	@echo "  backtest             Full backtest: fetch data + replay + decision gate"
@@ -115,11 +118,25 @@ db-migrate-phase10:
 	psql -U bot -d solana_bot -f migrations/003_price_alerts.sql
 	@echo "Phase 10 migrations done. 4 strategies seeded: conservative, balanced, aggressive, dip_buy"
 
+db-migrate-phase11:
+	@echo "Running Phase 11 migrations (trench_low_mcap + position overrides)..."
+	psql -U bot -d solana_bot -f migrations/004_trench_low_mcap.sql
+	psql -U bot -d solana_bot -f migrations/005_position_overrides.sql
+	@echo "Phase 11 migrations done. 5th strategy 'trench_low_mcap' available."
+	@echo "Activate with /strategy trench_low_mcap in Telegram."
+
 list-strategies:
 	psql -U bot -d solana_bot -c "SELECT id, name, enabled FROM strategies ORDER BY id;"
 
 show-pending-alerts:
 	psql -U bot -d solana_bot -c "SELECT id, mint, symbol, strategy_id, alert_type, target_ath_distance_pct FROM price_alerts WHERE status='pending' ORDER BY detected_at_ms DESC LIMIT 20;"
+
+show-overrides:
+	@echo "Open positions with active TP/SL/Trail overrides (Phase 11.1):"
+	psql -U bot -d solana_bot -c "SELECT id, token_symbol, tp_override_pct, sl_override_pct, trail_disabled, override_set_by FROM positions WHERE status='OPEN' AND (tp_override_pct IS NOT NULL OR sl_override_pct IS NOT NULL OR trail_disabled = TRUE) ORDER BY override_set_at_ms DESC;"
+
+pnl-30d:
+	psql -U bot -d solana_bot -c "SELECT exit_reason, COUNT(*) AS count, ROUND(AVG(realized_pnl_pct)::numeric, 2) AS avg_pct, ROUND(SUM(realized_pnl_sol)::numeric, 6) AS total_sol FROM positions WHERE status='CLOSED' AND exit_timestamp >= NOW() - INTERVAL '30 days' GROUP BY exit_reason ORDER BY count DESC;"
 
 deploy:
 	bash deploy/install.sh

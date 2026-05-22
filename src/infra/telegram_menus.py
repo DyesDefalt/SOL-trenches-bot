@@ -172,11 +172,20 @@ def build_positions_menu(
 
 def build_position_detail_menu(position: dict) -> InlineKeyboardMarkup:
     """
-    Sell controls for a single position.
+    Sell controls + Phase 11.1 quick-action overrides for a single position.
 
-    position: dict with at least {"db_id": int, "token_symbol": str}.
+    position: dict with {"db_id": int, "token_symbol": str, "trail_active": bool}.
+
+    Layout:
+      Row 1: [Sell 25%] [Sell 50%] [Sell 100%]
+      Row 2: [TP +25%] [TP +50%]                      ← Phase 11.1 override TP1
+      Row 3: [SL -15%] [SL -25%]                      ← Phase 11.1 override SL
+      Row 4: [Trail ON/OFF] [🔄 Refresh]              ← Phase 11.1 trail toggle
+      Row 5: [« Back]
     """
     db_id = position.get("db_id", 0)
+    trail_active = position.get("trail_active", True)
+    trail_label = "Trail ✓ ON" if trail_active else "Trail ○ OFF"
     keyboard = [
         [
             _btn("Sell 25%",  f"menu:ps:25:{db_id}"),
@@ -184,12 +193,94 @@ def build_position_detail_menu(position: dict) -> InlineKeyboardMarkup:
             _btn("Sell 100%", f"menu:ps:100:{db_id}"),
         ],
         [
-            _btn("Force TP", f"menu:ps:tp:{db_id}"),
-            _btn("Force SL", f"menu:ps:sl:{db_id}"),
+            _btn("TP +25%", f"menu:po:tp:25:{db_id}"),
+            _btn("TP +50%", f"menu:po:tp:50:{db_id}"),
+        ],
+        [
+            _btn("SL -15%", f"menu:po:sl:-15:{db_id}"),
+            _btn("SL -25%", f"menu:po:sl:-25:{db_id}"),
+        ],
+        [
+            _btn(trail_label,  f"menu:po:trail:{db_id}"),
+            _btn("🔄 Refresh", f"menu:po:refresh:{db_id}"),
         ],
         [_back_btn("positions")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def format_position_card(position: dict) -> str:
+    """
+    Phase 11.3: Rich text card for a single position (HTML formatted for Telegram).
+
+    position: dict from PositionManager.get_open_positions_summary() — keys include:
+      symbol, entry_price_usd, current_price_usd, peak_price_usd, gain_pct, size_sol,
+      tp_active_pct, sl_active_pct, trail_active, tp_override, sl_override,
+      buy_pressure_pct, vol_liq_ratio, rug_score, liquidity_usd, mcap_usd
+    """
+    sym = position.get("symbol") or position.get("token_address", "?")[:8]
+    entry = position.get("entry_price_usd") or 0
+    cur = position.get("current_price_usd") or entry
+    peak = position.get("peak_price_usd") or entry
+    gain = position.get("gain_pct")
+    size = position.get("size_sol") or 0
+
+    # PnL line
+    if gain is not None:
+        gain_emoji = "🟢" if gain >= 0 else "🔴"
+        gain_str = f"{gain_emoji} <b>{gain:+.2f}%</b>"
+    else:
+        gain_str = "<i>price loading…</i>"
+
+    # Multiple-of-entry display (1.5x, 3.36x etc.)
+    mult = cur / entry if entry > 0 else 1.0
+    peak_mult = peak / entry if entry > 0 else 1.0
+
+    # SL distance line
+    sl_pct = position.get("sl_active_pct", -25)
+    sl_price = entry * (1 + sl_pct / 100) if entry > 0 else 0
+    sl_distance_pct = ((cur - sl_price) / cur * 100) if cur > 0 else 0
+    sl_override_tag = " <code>[OVR]</code>" if position.get("sl_override") is not None else ""
+
+    # TP line
+    tp_pct = position.get("tp_active_pct", 80)
+    tp_override_tag = " <code>[OVR]</code>" if position.get("tp_override") is not None else ""
+    tp_done = []
+    if position.get("tp1_done"): tp_done.append("TP1")
+    if position.get("tp2_done"): tp_done.append("TP2")
+    if position.get("tp3_done"): tp_done.append("TP3")
+    tp_done_str = f" ({'+'.join(tp_done)} done)" if tp_done else ""
+
+    # Trail
+    trail_str = "✓ ON" if position.get("trail_active") else "○ OFF"
+
+    # Metrics line (only show what we have)
+    metrics_parts = []
+    if position.get("liquidity_usd"):
+        metrics_parts.append(f"Liq ${position['liquidity_usd'] / 1000:.1f}K")
+    if position.get("mcap_usd"):
+        metrics_parts.append(f"MCap ${position['mcap_usd'] / 1000:.1f}K")
+    if position.get("vol_liq_ratio") is not None:
+        metrics_parts.append(f"V/L {position['vol_liq_ratio']:.1f}x")
+    if position.get("buy_pressure_pct") is not None:
+        metrics_parts.append(f"BuyP {position['buy_pressure_pct']:.0f}%")
+    if position.get("rug_score") is not None:
+        metrics_parts.append(f"Rug {position['rug_score']}")
+    metrics_line = " · ".join(metrics_parts) if metrics_parts else ""
+
+    lines = [
+        f"<b>{sym}</b>  {gain_str}",
+        f"<code>Size:    {size:.4f} SOL</code>",
+        f"<code>Entry:   ${entry:.7f}</code>",
+        f"<code>Current: ${cur:.7f}  ({mult:.2f}x)</code>",
+        f"<code>Peak:    ${peak:.7f}  ({peak_mult:.2f}x)</code>",
+        f"<code>SL:      ${sl_price:.7f}  ({sl_pct:+.0f}%, {sl_distance_pct:+.1f}% away){sl_override_tag}</code>",
+        f"<code>TP1:     +{tp_pct:.0f}%{tp_done_str}{tp_override_tag}</code>",
+        f"<code>Trail:   {trail_str}</code>",
+    ]
+    if metrics_line:
+        lines.append(f"<code>{metrics_line}</code>")
+    return "\n".join(lines)
 
 
 def build_alerts_menu(

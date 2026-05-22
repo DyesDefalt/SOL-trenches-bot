@@ -21,8 +21,9 @@ Status: **All phases done.** This is the go-live checklist.
 | Charon parity (hot-reload strategies, fee-claim WS, dip-buy mode, interactive menus) | 10 | ✅ |
 | Trader filters bundle (anti-bundler + global fee + funded-from + holder balance) | 10.5 | ✅ |
 | AI Meme Quality Scorer + Fibonacci 0.786 entry helper | 10.6 | ✅ |
+| Operator UX polish (quick-action buttons, rich /pnl breakdown, rich position cards, trench_low_mcap) | 11 | ✅ |
 
-**Total: 494 unit tests pass.**
+**Total: 514 unit tests pass.**
 
 ## Pre-Flight Checklist
 
@@ -70,7 +71,8 @@ Status: **All phases done.** This is the go-live checklist.
 - [ ] `secrets/gmgn_private.pem` uploaded with chmod 600
 - [ ] `make db-init` ran successfully
 - [ ] `make db-migrate-phase10` ran successfully (strategies + price_alerts tables seeded)
-- [ ] `make list-strategies` shows 4 strategies (conservative, balanced=active, aggressive, dip_buy)
+- [ ] `make db-migrate-phase11` ran successfully (trench_low_mcap strategy + position override columns)
+- [ ] `make list-strategies` shows 5 strategies (conservative, balanced=active, aggressive, dip_buy, trench_low_mcap)
 
 ### Smoke Tests
 

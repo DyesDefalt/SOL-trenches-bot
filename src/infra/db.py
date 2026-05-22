@@ -133,6 +133,121 @@ class Database:
                 position_id,
             )
 
+    async def update_position_override(
+        self,
+        position_id: int,
+        tp_pct: float | None = None,
+        sl_pct: float | None = None,
+        trail_disabled: bool | None = None,
+        set_by: str = "telegram",
+    ) -> None:
+        """Phase 11.1: persist per-position TP/SL/trail override (idempotent)."""
+        assert self._pool is not None
+        # Build UPDATE dynamically — only set fields that are provided
+        sets: list[str] = []
+        args: list[Any] = []
+        idx = 1
+        if tp_pct is not None:
+            sets.append(f"tp_override_pct = ${idx}")
+            args.append(float(tp_pct))
+            idx += 1
+        if sl_pct is not None:
+            sets.append(f"sl_override_pct = ${idx}")
+            args.append(float(sl_pct))
+            idx += 1
+        if trail_disabled is not None:
+            sets.append(f"trail_disabled = ${idx}")
+            args.append(bool(trail_disabled))
+            idx += 1
+        if not sets:
+            return  # nothing to update
+        sets.append(f"override_set_at_ms = ${idx}")
+        args.append(int(__import__("time").time() * 1000))
+        idx += 1
+        sets.append(f"override_set_by = ${idx}")
+        args.append(str(set_by))
+        idx += 1
+        sets.append(f"updated_at = NOW()")
+        args.append(int(position_id))
+        sql = f"UPDATE positions SET {', '.join(sets)} WHERE id = ${idx}"
+        async with self._pool.acquire() as conn:
+            await conn.execute(sql, *args)
+
+    async def get_pnl_breakdown_by_exit_reason(
+        self,
+        days: int = 30,
+        dry_run: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Phase 11.2: group closed positions by exit_reason with count + avg PnL + total PnL.
+
+        Returns: [{exit_reason, count, avg_pnl_pct, total_pnl_sol, avg_hold_minutes}, ...]
+        """
+        assert self._pool is not None
+        where_dry = "AND dry_run = $2" if dry_run is not None else ""
+        params: list[Any] = [days]
+        if dry_run is not None:
+            params.append(dry_run)
+        sql = f"""
+            SELECT
+                exit_reason,
+                COUNT(*)::int AS count,
+                ROUND(AVG(realized_pnl_pct)::numeric, 2)::float AS avg_pnl_pct,
+                ROUND(SUM(realized_pnl_sol)::numeric, 6)::float AS total_pnl_sol,
+                ROUND(AVG(EXTRACT(EPOCH FROM (exit_timestamp - entry_timestamp)) / 60)::numeric, 1)::float AS avg_hold_minutes
+            FROM positions
+            WHERE status = 'CLOSED'
+              AND exit_timestamp >= NOW() - ($1::int * INTERVAL '1 day')
+              AND exit_reason IS NOT NULL
+              {where_dry}
+            GROUP BY exit_reason
+            ORDER BY count DESC
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(sql, *params)
+            return [dict(row) for row in rows]
+
+    async def get_best_worst_trades(
+        self,
+        days: int = 30,
+        limit: int = 1,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Phase 11.2: top N best + worst closed trades by realized_pnl_pct."""
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            best = await conn.fetch(
+                """
+                SELECT token_symbol, token_address, realized_pnl_pct, realized_pnl_sol,
+                       exit_reason,
+                       EXTRACT(EPOCH FROM (exit_timestamp - entry_timestamp)) / 60 AS hold_minutes
+                FROM positions
+                WHERE status = 'CLOSED'
+                  AND exit_timestamp >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND realized_pnl_pct IS NOT NULL
+                ORDER BY realized_pnl_pct DESC NULLS LAST
+                LIMIT $2
+                """,
+                days, limit,
+            )
+            worst = await conn.fetch(
+                """
+                SELECT token_symbol, token_address, realized_pnl_pct, realized_pnl_sol,
+                       exit_reason,
+                       EXTRACT(EPOCH FROM (exit_timestamp - entry_timestamp)) / 60 AS hold_minutes
+                FROM positions
+                WHERE status = 'CLOSED'
+                  AND exit_timestamp >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND realized_pnl_pct IS NOT NULL
+                ORDER BY realized_pnl_pct ASC NULLS LAST
+                LIMIT $2
+                """,
+                days, limit,
+            )
+            return {
+                "best": [dict(row) for row in best],
+                "worst": [dict(row) for row in worst],
+            }
+
     async def close_position(
         self,
         position_id: int,

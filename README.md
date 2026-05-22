@@ -672,6 +672,109 @@ Expected improvement: ~+15-25% absolute winrate uplift in dip-buy mode with all 
 
 ---
 
+## Phase 11: Operator UX Polish
+
+After observing real bot dashboards from Charon and others (consistent **15-19% winrates** with mostly hard-SL losses), Phase 11 closes UX gaps that empower the operator to intervene fast and learn from the trade tape.
+
+### 11.1 Per-Position Quick-Action Buttons
+
+Open `/menu` → `Positions` → tap a token. New action buttons:
+
+```
+[Sell 25%] [Sell 50%] [Sell 100%]
+[TP +25%]  [TP +50%]                ← override TP1 target on the fly
+[SL -15%]  [SL -25%]                ← tighten SL when momentum stalls
+[Trail ON/OFF]  [🔄 Refresh]        ← disable trail or pull fresh metrics
+[« Back]
+```
+
+Each override is per-position (not global), persists in DB, and survives bot restart. Use case: position pumped +40%, tap `TP +25%` to lock partial profit immediately instead of waiting for the global +80% TP1.
+
+### 11.2 Rich `/pnl` Breakdown
+
+`/pnl` now shows exit-reason segmentation + best/worst trades:
+
+```
+📈 PnL Summary (7 days)
+
+By Day:
+🟢 2026-05-22: +0.0245 SOL (5t, 3W/2L)
+🔴 2026-05-21: -0.0120 SOL (3t, 1W/2L)
+...
+Total: +0.0125 SOL · 8t · WR 50.0%
+
+By Exit Reason:
+🟢 TRAILING       2t · avg +85.2% · +0.0820 SOL · 28m
+🟢 TP1            3t · avg +30.4% · +0.0260 SOL · 12m
+🔴 SL             3t · avg -22.1% · -0.0660 SOL · 8m
+
+🏆 Best:  WIF +189.5% (+0.0648 SOL · 22m · TRAILING)
+💩 Worst: RUG -45.2% (-0.0226 SOL · 5m · SL)
+
+Tip: /pnl 30 → look back 30 days
+```
+
+The exit-reason breakdown shows you which TP tier earns most and which exits leak. Charon's data shows TRAILING_TP averages +68% but only 22/250 trades hit it — that's the lever to widen.
+
+### 11.3 Rich Position Cards
+
+Position detail view now shows everything you need to decide an override in one screen:
+
+```
+WIF  🟢 +63.30%
+Size:    0.0050 SOL
+Entry:   $0.0001162
+Current: $0.0001898  (1.63x)
+Peak:    $0.0001962  (1.69x)
+SL:      $0.0000232  (-58%, +58% away)
+TP1:     +80%
+Trail:   ✓ ON
+Liq $26.5K · MCap $116.3K · V/L 3.5x · BuyP 53% · Rug 16
+```
+
+When a TP/SL override is active, an `[OVR]` badge appears next to that field.
+
+### 11.4 `trench_low_mcap` Strategy
+
+Per the Charon community admin (Meridian): **"main di mcap 7-15k rrnya lebih bagus daripada 50k keatas"** — winrate at MC 7-15k is better than 50k+.
+
+5th seeded strategy: `trench_low_mcap`. Activate via Telegram:
+
+```
+/strategy trench_low_mcap
+```
+
+Tuned for sub-15k MC sweet spot with smaller positions + bigger TPs:
+
+```ini
+FILTER_MIN_MCAP_USD=5000
+FILTER_MAX_MCAP_USD=18000
+MAX_POSITION_SIZE_SOL=0.030
+TP1_GAIN_PCT=80     # 10x target on TP3
+TP2_GAIN_PCT=200
+TP3_GAIN_PCT=500
+HARD_SL_PCT=-30
+```
+
+### Phase 11 Telegram Commands
+
+| Command | What It Does |
+|---|---|
+| `/menu → Positions → <symbol>` | Rich position card + quick-action buttons |
+| `/pnl [days]` | Enriched breakdown (default 7d, can be 1-365d) |
+| `/strategy trench_low_mcap` | Activate the new sub-15k MC recipe |
+
+### Why These Matter
+
+| Problem in Charon's 15.2% winrate | Phase 11 Solution |
+|---|---|
+| Operator can't react fast enough to TP a +30% pump before reversal | Quick-action buttons `[TP +25%]` `[TP +50%]` |
+| No insight into which exit reasons earn vs lose | `/pnl` breakdown by exit reason |
+| Stale price metrics, can't tell if a position is alive | `[🔄 Refresh]` button + rich card |
+| Trading wide MC range (60k cap) dilutes signal | `trench_low_mcap` recipe focuses sub-15k |
+
+---
+
 ## Risk Management
 
 The bot has **3 independent safety systems**. All run concurrently.
@@ -980,9 +1083,10 @@ solana transfer <COLD_ADDRESS> ALL --allow-unfunded-recipient \
 | 10 | ✅ | Charon parity (hot-reload strategies, fee-claim WS, dip-buy mode, interactive menus) |
 | 10.5 | ✅ | Trader filters bundle (anti-bundler + global fee + funded-from + holder balance) |
 | 10.6 | ✅ | AI Meme Quality Scorer + Fibonacci 0.786 entry helper |
-| 11 | 🔮 | DEX aggregator routing comparison (Raydium + Orca direct) |
-| 12 | 🔮 | Multi-chain support (Base, BSC, Arbitrum) |
-| 13 | 🔮 | Web dashboard (Next.js) for non-Telegram users |
+| 11 | ✅ | UX polish: per-position quick-action buttons, rich /pnl breakdown by exit reason, rich position cards, trench_low_mcap recipe |
+| 12 | 🔮 | DEX aggregator routing comparison (Raydium + Orca direct) |
+| 13 | 🔮 | Multi-chain support (Base, BSC, Arbitrum) |
+| 14 | 🔮 | Web dashboard (Next.js) for non-Telegram users |
 
 ---
 

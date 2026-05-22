@@ -278,17 +278,40 @@ def test_positions_menu_pagination():
 # ---------------------------------------------------------------------------
 
 def test_position_detail_menu_buttons():
-    pos = {"db_id": 7, "token_symbol": "WIF"}
+    """Phase 11.1: position detail menu now has sell + TP/SL/Trail override buttons."""
+    pos = {"db_id": 7, "token_symbol": "WIF", "trail_active": True}
     markup = build_position_detail_menu(pos)
     buttons = _all_buttons(markup)
     texts = [btn.text for btn in buttons]
 
-    assert any("25%" in t for t in texts)
-    assert any("50%" in t for t in texts)
-    assert any("100%" in t for t in texts)
-    assert any("Force TP" in t for t in texts)
-    assert any("Force SL" in t for t in texts)
-    assert any("Back" in t for t in texts)
+    # Sell rows
+    assert any("25%" in t for t in texts), texts
+    assert any("50%" in t for t in texts), texts
+    assert any("100%" in t for t in texts), texts
+    # Phase 11.1 override rows
+    assert any("TP +25%" in t or "TP +50%" in t for t in texts), texts
+    assert any("SL -15%" in t or "SL -25%" in t for t in texts), texts
+    assert any("Trail" in t for t in texts), texts
+    assert any("Refresh" in t for t in texts), texts
+    assert any("Back" in t for t in texts), texts
+
+
+def test_position_detail_menu_callback_data_phase11():
+    """Phase 11.1: verify callback_data prefixes for new override buttons."""
+    pos = {"db_id": 42, "token_symbol": "BONK", "trail_active": False}
+    markup = build_position_detail_menu(pos)
+    buttons = _all_buttons(markup)
+    data_strings = [btn.callback_data for btn in buttons]
+
+    # TP/SL overrides use 'menu:po:tp:VALUE:ID' / 'menu:po:sl:VALUE:ID'
+    assert any(d.startswith("menu:po:tp:") and d.endswith(":42") for d in data_strings), data_strings
+    assert any(d.startswith("menu:po:sl:") and d.endswith(":42") for d in data_strings), data_strings
+    # Trail toggle
+    assert any(d == "menu:po:trail:42" for d in data_strings), data_strings
+    # Refresh
+    assert any(d == "menu:po:refresh:42" for d in data_strings), data_strings
+    # Sell remains 'menu:ps:PCT:ID'
+    assert any(d.startswith("menu:ps:") and d.endswith(":42") for d in data_strings), data_strings
 
 
 # ---------------------------------------------------------------------------

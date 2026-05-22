@@ -129,6 +129,25 @@ class CallbackRouter:
             pos_id = args[1] if len(args) > 1 else ""
             await self._handle_position_sell(query, pct_or_type, pos_id)
 
+        # Phase 11.1: Position override (tp/sl/trail/refresh)
+        elif action == "po":
+            override_type = args[0] if args else ""
+            if override_type in ("tp", "sl"):
+                # menu:po:tp:25:1234  OR  menu:po:sl:-15:1234
+                value_str = args[1] if len(args) > 1 else "0"
+                pos_id = args[2] if len(args) > 2 else ""
+                await self._handle_position_override(query, override_type, value_str, pos_id)
+            elif override_type == "trail":
+                # menu:po:trail:1234
+                pos_id = args[1] if len(args) > 1 else ""
+                await self._handle_position_trail_toggle(query, pos_id)
+            elif override_type == "refresh":
+                # menu:po:refresh:1234
+                pos_id = args[1] if len(args) > 1 else ""
+                await self._handle_position_refresh(query, pos_id)
+            else:
+                await query.answer(text=f"Unknown override: {override_type}")
+
         # Alert cancel
         elif action == "ac":
             alert_id = args[0] if args else ""
@@ -304,36 +323,54 @@ class CallbackRouter:
     # ------------------------------------------------------------------
 
     async def _handle_position_detail(self, query: Any, position_id: str) -> None:
-        """Show sell controls for a single position."""
+        """Show rich position card + sell/override controls (Phase 11.1+11.3)."""
         await query.answer()
-        positions = self._fetch_positions()
         try:
             pid = int(position_id)
         except (ValueError, TypeError):
             pid = -1
 
-        pos = next((p for p in positions if p.get("db_id") == pid), None)
-        if pos is None:
-            await query.edit_message_text(
-                text=f"Position #{html.escape(str(position_id))} not found.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=build_back_menu("positions"),
-            )
-            return
+        # Phase 11.3: prefer the rich summary from PositionManager (has overrides + metrics)
+        pm = getattr(self._bot, "position_manager", None) or getattr(self._bot, "positions_manager", None)
+        rich_pos = None
+        if pm is not None and hasattr(pm, "get_open_positions_summary"):
+            try:
+                for p in pm.get_open_positions_summary():
+                    if p.get("db_id") == pid:
+                        rich_pos = p
+                        break
+            except Exception:
+                rich_pos = None
 
-        sym = html.escape(pos.get("token_symbol", "???"))
-        gain = pos.get("gain_pct", 0.0)
-        sign = "+" if gain >= 0 else ""
-        text = (
-            f"<b>{sym}</b>\n"
-            f"PnL: {sign}{gain:.2f}%\n"
-            f"Entry: ${pos.get('entry_price_usd', 0):.6f}\n"
-            f"Remaining: {pos.get('amount_remaining_token', 0):,.0f} tokens"
-        )
+        if rich_pos is None:
+            # Fallback to legacy fetch
+            positions = self._fetch_positions()
+            pos = next((p for p in positions if p.get("db_id") == pid), None)
+            if pos is None:
+                await query.edit_message_text(
+                    text=f"Position #{html.escape(str(position_id))} not found.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=build_back_menu("positions"),
+                )
+                return
+            sym = html.escape(pos.get("token_symbol", "???"))
+            gain = pos.get("gain_pct", 0.0)
+            sign = "+" if gain >= 0 else ""
+            text = (
+                f"<b>{sym}</b>\n"
+                f"PnL: {sign}{gain:.2f}%\n"
+                f"Entry: ${pos.get('entry_price_usd', 0):.6f}\n"
+                f"Remaining: {pos.get('amount_remaining_token', 0):,.0f} tokens"
+            )
+            rich_pos = pos  # use legacy for keyboard
+        else:
+            # Use rich Phase 11.3 formatter
+            from src.infra.telegram_menus import format_position_card
+            text = format_position_card(rich_pos)
         await query.edit_message_text(
             text=text,
             parse_mode=ParseMode.HTML,
-            reply_markup=build_position_detail_menu(pos),
+            reply_markup=build_position_detail_menu(rich_pos),
         )
 
     async def _handle_position_sell(
@@ -567,3 +604,111 @@ class CallbackRouter:
         if user is None:
             return False
         return str(user.id) == str(settings.telegram_chat_id)
+
+    # ------------------------------------------------------------------
+    # Phase 11.1: Position override handlers (TP/SL/Trail/Refresh)
+    # ------------------------------------------------------------------
+
+    async def _handle_position_override(
+        self, query: Any, override_type: str, value_str: str, pos_id: str
+    ) -> None:
+        """Apply per-position TP or SL override via Telegram quick-action button."""
+        pm = getattr(self.bot_ref, "position_manager", None)
+        if pm is None:
+            await query.answer(text="Position manager unavailable", show_alert=True)
+            return
+        try:
+            position_id = int(pos_id)
+            value = float(value_str)
+        except (ValueError, TypeError):
+            await query.answer(text="Invalid value", show_alert=True)
+            return
+
+        set_by = f"tg_user_{query.from_user.id}" if query.from_user else "telegram"
+        try:
+            if override_type == "tp":
+                ok = await pm.override_tp(position_id, value, set_by=set_by)
+                action_label = f"TP set to +{value:.0f}%"
+            elif override_type == "sl":
+                ok = await pm.override_sl(position_id, value, set_by=set_by)
+                action_label = f"SL set to {value:+.0f}%"
+            else:
+                await query.answer(text="Unknown override type", show_alert=True)
+                return
+        except Exception as e:
+            await query.answer(text=f"Error: {e}", show_alert=True)
+            return
+
+        if not ok:
+            await query.answer(text="Position not found (may have closed)", show_alert=True)
+            return
+
+        await query.answer(text=f"✓ {action_label}")
+        # Re-render the position detail menu to show updated state
+        await self._handle_position_detail(query, pos_id)
+
+    async def _handle_position_trail_toggle(self, query: Any, pos_id: str) -> None:
+        """Toggle trailing stop on/off for a single position."""
+        pm = getattr(self.bot_ref, "position_manager", None)
+        if pm is None:
+            await query.answer(text="Position manager unavailable", show_alert=True)
+            return
+        try:
+            position_id = int(pos_id)
+        except (ValueError, TypeError):
+            await query.answer(text="Invalid position id", show_alert=True)
+            return
+
+        set_by = f"tg_user_{query.from_user.id}" if query.from_user else "telegram"
+        try:
+            new_disabled = await pm.toggle_trail(position_id, set_by=set_by)
+        except Exception as e:
+            await query.answer(text=f"Error: {e}", show_alert=True)
+            return
+
+        if new_disabled is None:
+            await query.answer(text="Position not found (may have closed)", show_alert=True)
+            return
+
+        status = "OFF" if new_disabled else "ON"
+        await query.answer(text=f"✓ Trail {status}")
+        await self._handle_position_detail(query, pos_id)
+
+    async def _handle_position_refresh(self, query: Any, pos_id: str) -> None:
+        """Force a fresh price + metric pull and re-render the card."""
+        pm = getattr(self.bot_ref, "position_manager", None)
+        gecko = getattr(self.bot_ref, "gecko", None)
+        if pm is None or gecko is None:
+            await query.answer(text="Components unavailable", show_alert=True)
+            return
+        try:
+            position_id = int(pos_id)
+        except (ValueError, TypeError):
+            await query.answer(text="Invalid position id", show_alert=True)
+            return
+
+        pos = pm._find_position_by_db_id(position_id)
+        if pos is None:
+            await query.answer(text="Position not found", show_alert=True)
+            return
+
+        try:
+            token_data = await gecko.get_token(pos.token_address)
+            attrs = token_data.get("attributes", {})
+            new_price = float(attrs.get("price_usd", 0) or 0)
+            new_liq = attrs.get("total_reserve_in_usd") or attrs.get("liquidity_usd")
+            new_mcap = attrs.get("market_cap_usd") or attrs.get("fdv_usd")
+            if new_price > 0:
+                await pm.update_price(pos.token_address, new_price)
+            if new_liq:
+                try: pos.current_liquidity_usd = float(new_liq)
+                except Exception: pass
+            if new_mcap:
+                try: pos.current_mcap_usd = float(new_mcap)
+                except Exception: pass
+        except Exception as e:
+            await query.answer(text=f"Refresh failed: {e}", show_alert=True)
+            return
+
+        await query.answer(text="✓ Refreshed")
+        await self._handle_position_detail(query, pos_id)
