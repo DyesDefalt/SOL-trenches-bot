@@ -138,15 +138,30 @@ async def test_nansen() -> tuple[bool, str]:
         return False, f"Nansen: {e}"
 
 
-async def test_birdeye() -> tuple[bool, str]:
-    """Test Birdeye (works without API key for some endpoints)."""
+async def test_birdeye() -> tuple[bool | None, str]:
+    """
+    Test Birdeye token price endpoint.
+
+    Birdeye REQUIRES an API key for /defi/price (returns 401 without). The free
+    "Standard" plan (30K CU/mo, 1 RPS) is enough for our use case — sign up at
+    https://bds.birdeye.so/auth/sign-up then generate a key at
+    https://bds.birdeye.so/user/security and set BIRDEYE_API_KEY in .env.
+
+    If no key is configured, this test SKIPS instead of failing so the smoke
+    suite can still go green (Birdeye is optional — GeckoTerminal covers price).
+    """
+    if not settings.birdeye_api_key:
+        return None, (
+            "BIRDEYE_API_KEY not set — SKIP. Free key at "
+            "https://bds.birdeye.so/user/security (Standard plan, 30K CU/mo)."
+        )
     try:
         from src.intel.birdeye_client import BirdeyeClient
         async with BirdeyeClient() as birdeye:
             usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
             price = await birdeye.get_token_price(usdc)
             if price:
-                return True, f"Birdeye OK. USDC price fetched."
+                return True, "Birdeye OK. USDC price fetched."
             return False, "Birdeye returned empty"
     except Exception as e:
         return False, f"Birdeye: {e}"
@@ -192,7 +207,13 @@ async def test_pumpfun() -> tuple[bool, str]:
         return False, f"Pump.fun: {e}"
 
 
-TESTS: list[tuple[str, Callable[[], Awaitable[tuple[bool, str]]]]] = [
+# Per-test result is `tuple[bool | None, str]`:
+#   True  → PASS  (green)
+#   False → FAIL  (red, counts toward exit code 1)
+#   None  → SKIP  (yellow, does NOT fail the suite — used for optional components)
+TestResult = tuple[bool | None, str]
+
+TESTS: list[tuple[str, Callable[[], Awaitable[TestResult]]]] = [
     ("Config", test_config),
     ("Redis", test_redis),
     ("Helius RPC", test_helius),
@@ -216,25 +237,38 @@ async def main() -> int:
     table.add_column("Details")
 
     all_ok = True
+    skipped = 0
     for name, test_fn in TESTS:
         try:
             ok, detail = await test_fn()
         except Exception as e:
             ok, detail = False, f"unexpected: {e}"
 
-        status = "[green]✓ PASS[/green]" if ok else "[red]✗ FAIL[/red]"
-        table.add_row(name, status, detail)
-        if not ok:
+        if ok is None:
+            status = "[yellow]⊘ SKIP[/yellow]"
+            skipped += 1
+        elif ok:
+            status = "[green]✓ PASS[/green]"
+        else:
+            status = "[red]✗ FAIL[/red]"
             all_ok = False
+
+        table.add_row(name, status, detail)
 
     console.print(table)
 
-    if all_ok:
+    if all_ok and skipped == 0:
         console.print("\n[bold green]All tests passed — Phase 0 ready, lanjut Phase 1![/bold green]\n")
         return 0
-    else:
-        console.print("\n[bold red]Some tests failed — fix di atas dulu sebelum lanjut.[/bold red]\n")
-        return 1
+    if all_ok:
+        console.print(
+            f"\n[bold green]All required tests passed[/bold green] "
+            f"[yellow]({skipped} skipped — optional components)[/yellow]. "
+            f"[bold green]Phase 0 ready.[/bold green]\n"
+        )
+        return 0
+    console.print("\n[bold red]Some tests failed — fix di atas dulu sebelum lanjut.[/bold red]\n")
+    return 1
 
 
 if __name__ == "__main__":

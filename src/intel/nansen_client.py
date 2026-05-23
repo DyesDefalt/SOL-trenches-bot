@@ -246,10 +246,12 @@ class NansenClient:
         """
         Smart-money net-flow across all tokens on given chains.
 
-        Cost: 1 credit (uses smart-money netflows endpoint).
+        Cost: 1 credit (uses smart-money netflow endpoint — singular per API).
         """
         body = {"chains": chains, "limit": limit}
-        result = await self._post("/api/v1/smart-money/netflows", body, cost=1)
+        # Endpoint is `/netflow` (singular). Server explicitly rejects `/netflows` (plural)
+        # with a 404 hint: "Did you mean '/api/v1/smart-money/netflow'?"
+        result = await self._post("/api/v1/smart-money/netflow", body, cost=1)
         if result is None:
             return []
         if isinstance(result, dict):

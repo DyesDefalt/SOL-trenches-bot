@@ -78,12 +78,34 @@ class GMGNClient:
 
         self.base_url = base_url or settings.gmgn_base_url
 
+        # GMGN sits behind Cloudflare. Generic User-Agent (e.g. "solana-sniper-bot/0.1")
+        # gets a 403 challenge page BEFORE the request reaches GMGN's API layer — so the
+        # Bearer token is irrelevant in that case. The fix is to look like a real Chrome
+        # browser at the HTTP-headers level: realistic UA + sec-ch-ua client hints +
+        # Sec-Fetch-* + Origin/Referer pointing back at gmgn.ai.
+        #
+        # If this STILL gets blocked, Cloudflare is likely fingerprinting the TLS
+        # ClientHello (JA3) — at that point swap httpx for curl_cffi with
+        # `impersonate="chrome124"` which mimics Chrome at the socket level.
         self._http = BaseHTTPClient(
             base_url=self.base_url,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
-                "Accept": "application/json",
-                "User-Agent": "solana-sniper-bot/0.1",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Linux"',
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "Referer": "https://gmgn.ai/",
+                "Origin": "https://gmgn.ai",
             },
             timeout=30.0,
             max_retries=2,  # Conservative untuk hindari ban extension
