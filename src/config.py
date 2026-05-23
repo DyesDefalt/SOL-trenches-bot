@@ -42,7 +42,10 @@ class Settings(BaseSettings):
     # --- GMGN ---
     gmgn_api_key: str = Field(default="")
     gmgn_private_key_path: Path | None = None
-    gmgn_base_url: str = "https://gmgn.ai"
+    # Use the OpenAPI host. The consumer site (https://gmgn.ai) is Cloudflare-
+    # protected and 403s any programmatic request. See src/clients/gmgn.py.
+    # If `.env` still sets GMGN_BASE_URL=https://gmgn.ai the client overrides it.
+    gmgn_base_url: str = "https://openapi.gmgn.ai"
 
     # --- Solana Wallet ---
     wallet_path: Path | None = None

@@ -247,10 +247,20 @@ class NansenClient:
         Smart-money net-flow across all tokens on given chains.
 
         Cost: 1 credit (uses smart-money netflow endpoint — singular per API).
+
+        Schema reference: docs.nansen.ai/api/smart-money/netflows
+        - `chains` required (array of SmartMoneyChain enum values)
+        - `pagination` object: { page, per_page (max 1000) }
+        - DO NOT pass a bare `limit` field — server rejects with 422
+          "Field 'limit' is not recognized".
         """
-        body = {"chains": chains, "limit": limit}
-        # Endpoint is `/netflow` (singular). Server explicitly rejects `/netflows` (plural)
-        # with a 404 hint: "Did you mean '/api/v1/smart-money/netflow'?"
+        # Endpoint is `/netflow` (singular). Server explicitly rejects `/netflows`
+        # (plural) with a 404 hint: "Did you mean '/api/v1/smart-money/netflow'?"
+        per_page = min(max(limit, 1), 1000)  # clamp to 1..1000 per API max
+        body = {
+            "chains": chains,
+            "pagination": {"page": 1, "per_page": per_page},
+        }
         result = await self._post("/api/v1/smart-money/netflow", body, cost=1)
         if result is None:
             return []

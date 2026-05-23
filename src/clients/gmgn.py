@@ -1,5 +1,5 @@
 """
-GMGN.ai API client.
+GMGN.ai OpenAPI client.
 
 Source utama untuk:
 - Smart Money trades (real-time wallet activity)
@@ -8,18 +8,35 @@ Source utama untuk:
 - Trending tokens (Trenches, new launches)
 - Wallet portfolio (holdings, P&L, win rate)
 
-Auth: API Key di header. Optional Ed25519 signing untuk swap endpoints (belum dipakai
-di Phase 1 — Phase 1 read-only).
+CRITICAL: Use https://openapi.gmgn.ai (NOT gmgn.ai consumer site behind Cloudflare).
+The consumer site /api/v1/* paths are website-internal and CF-protected — they will
+403 on any non-browser request. The official OpenAPI lives on a separate host with
+its own auth scheme. Endpoints are mostly the same name but WITHOUT the /api prefix:
+e.g. /v1/user/smartmoney (not /api/v1/user/smartmoney).
 
-Rate limit: leaky-bucket rate=10 capacity=10 dengan weight per endpoint.
+Auth modes (per gmgn-skills OpenApiClient.ts):
+- "Exist" auth (read-only: market, token, portfolio):
+    X-APIKEY header + timestamp (Unix seconds) + client_id (UUID) query params.
+    Server validates timestamp within ±5s, rejects client_id replays within 7s.
+- "Signed" auth (writes: swap, order, follow-wallet):
+    All of the above PLUS X-Signature header (Ed25519 or RSA-PSS signature over
+    `{subPath}:{sorted_query_string}:{body}:{timestamp}`).
 
-CRITICAL:
-- Jangan retry agresif kalau 429 — ban extend 5s per retry, max 5 menit.
+Phase 1 is read-only → only "Exist" auth implemented here. Add `_request_signed()`
+when you wire trading.
+
+Rate limit: 1 RPS per GMGN docs (data-crawling open API policy). NOT 10.
+- Jangan retry agresif kalau 429 — ban extend per retry, max 5 menit.
 - IPv4 only (GMGN tidak support IPv6).
+
+Demo API key for testing without signup: gmgn_solbscbaseethmonadtron (per
+official Readme.md, public demo key, low-volume only).
 """
 
 from __future__ import annotations
 
+import time
+import uuid
 from typing import Any, Literal
 
 from src.clients.base import BaseHTTPClient, HTTPError, RateLimitError
@@ -34,19 +51,23 @@ Chain = Literal["sol", "bsc", "base", "eth"]
 TradeSide = Literal["buy", "sell"]
 
 
-# Endpoint weights per GMGN docs
+# Endpoint weights per GMGN docs.
+# Note: paths are WITHOUT `/api` prefix on the OpenAPI host (openapi.gmgn.ai).
 ENDPOINT_WEIGHTS: dict[str, int] = {
     # Track (smart money / KOL / followed wallets)
-    "/api/v1/user/smartmoney": 1,
-    "/api/v1/user/kol": 1,
-    "/api/v1/trade/follow_wallet": 3,
+    "/v1/user/smartmoney": 1,
+    "/v1/user/kol": 1,
+    "/v1/trade/follow_wallet": 3,
     # Portfolio
-    "/api/v1/user/info": 1,
-    "/api/v1/user/wallet_holdings": 2,
-    "/api/v1/user/wallet_activity": 3,
-    "/api/v1/user/wallet_stats": 3,
-    "/api/v1/user/wallet_token_balance": 1,
-    "/api/v1/user/created_tokens": 2,
+    "/v1/user/info": 1,
+    "/v1/user/wallet_holdings": 2,
+    "/v1/user/wallet_activity": 3,
+    "/v1/user/wallet_stats": 3,
+    "/v1/user/wallet_token_balance": 1,
+    "/v1/user/created_tokens": 2,
+    # Market
+    "/v1/market/rank": 1,
+    "/v1/token/info": 1,
 }
 
 DEFAULT_WEIGHT = 2  # konservatif untuk endpoint tak terdaftar
@@ -76,44 +97,39 @@ class GMGNClient:
         if not self.api_key:
             raise ValueError("GMGN_API_KEY not set in env")
 
-        self.base_url = base_url or settings.gmgn_base_url
+        # Default base URL is the OpenAPI host. If `settings.gmgn_base_url` still
+        # points at the old consumer site (`https://gmgn.ai`), override it — that
+        # host is Cloudflare-protected and will 403 every programmatic request.
+        configured = base_url or settings.gmgn_base_url
+        if configured.rstrip("/") in ("https://gmgn.ai", "http://gmgn.ai"):
+            log.warning(
+                "gmgn_base_url_overridden",
+                old=configured,
+                new="https://openapi.gmgn.ai",
+                reason="consumer site is Cloudflare-protected; use OpenAPI host",
+            )
+            configured = "https://openapi.gmgn.ai"
+        self.base_url = configured
 
-        # GMGN sits behind Cloudflare. Generic User-Agent (e.g. "solana-sniper-bot/0.1")
-        # gets a 403 challenge page BEFORE the request reaches GMGN's API layer — so the
-        # Bearer token is irrelevant in that case. The fix is to look like a real Chrome
-        # browser at the HTTP-headers level: realistic UA + sec-ch-ua client hints +
-        # Sec-Fetch-* + Origin/Referer pointing back at gmgn.ai.
-        #
-        # If this STILL gets blocked, Cloudflare is likely fingerprinting the TLS
-        # ClientHello (JA3) — at that point swap httpx for curl_cffi with
-        # `impersonate="chrome124"` which mimics Chrome at the socket level.
+        # Auth header is X-APIKEY (NOT Authorization: Bearer). timestamp + client_id
+        # are added per-request via `_auth_query()` because both must be fresh
+        # (timestamp ±5s window, client_id replay-protected for 7s).
         self._http = BaseHTTPClient(
             base_url=self.base_url,
             headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Linux"',
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-                "Referer": "https://gmgn.ai/",
-                "Origin": "https://gmgn.ai",
+                "X-APIKEY": self.api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "solana-sniper-bot/0.1",
             },
             timeout=30.0,
             max_retries=2,  # Conservative untuk hindari ban extension
             force_ipv4=True,
         )
 
-        # Single shared limiter — semua endpoint share quota di GMGN
-        self._limiter = LeakyBucket(rate=10.0, capacity=10.0, name="gmgn")
+        # Per GMGN data-crawling policy: 1 RPS sustained. Burst=1 to avoid
+        # tripping the IP ban that ratchets up per 429.
+        self._limiter = LeakyBucket(rate=1.0, capacity=1.0, name="gmgn")
 
     async def connect(self) -> None:
         """Lazy alias for warming connection (no-op kalau sudah ready)."""
@@ -129,8 +145,21 @@ class GMGNClient:
         await self.close()
 
     # ---------------------------------------------------------------------
-    # Internal: rate-limited request
+    # Internal: rate-limited "Exist" auth request
     # ---------------------------------------------------------------------
+    @staticmethod
+    def _auth_query() -> dict[str, str | int]:
+        """Build per-request auth params: Unix-seconds timestamp + UUID client_id.
+
+        Server validates timestamp within ±5s clock skew, and rejects replays of
+        the same client_id within a 7-second window. Both fields are mandatory on
+        every OpenAPI call — read-only ("Exist") or signed.
+        """
+        return {
+            "timestamp": int(time.time()),
+            "client_id": str(uuid.uuid4()),
+        }
+
     async def _request(
         self,
         method: str,
@@ -141,8 +170,19 @@ class GMGNClient:
         weight = ENDPOINT_WEIGHTS.get(path, DEFAULT_WEIGHT)
         await self._limiter.acquire(weight=weight)
 
+        # Merge caller params with the per-request auth params. Caller params
+        # win on key collision (shouldn't happen since timestamp/client_id are
+        # GMGN-reserved names).
+        merged_params: dict[str, Any] = {**self._auth_query(), **(params or {})}
+
         try:
-            return await self._http.request(method, path, params=params, json=json, retry_on_429=False)
+            return await self._http.request(
+                method,
+                path,
+                params=merged_params,
+                json=json,
+                retry_on_429=False,
+            )
         except RateLimitError as e:
             # GMGN ban behavior — jangan retry, log dan re-raise
             log.error(
@@ -174,7 +214,7 @@ class GMGNClient:
 
         result = await self._request(
             "GET",
-            "/api/v1/user/smartmoney",
+            "/v1/user/smartmoney",
             params={"chain": chain, "limit": limit},
         )
         trades = result.get("data", [])
@@ -195,7 +235,7 @@ class GMGNClient:
 
         result = await self._request(
             "GET",
-            "/api/v1/user/kol",
+            "/v1/user/kol",
             params={"chain": chain, "limit": limit},
         )
         trades = result.get("data", [])
@@ -220,8 +260,9 @@ class GMGNClient:
         """
         result = await self._request(
             "GET",
-            "/api/v1/user/wallet_stats",
-            params={"chain": chain, "wallet": wallet, "period": period},
+            "/v1/user/wallet_stats",
+            # OpenAPI uses `wallet_address` (not `wallet`) per OpenApiClient.ts.
+            params={"chain": chain, "wallet_address": wallet, "period": period},
         )
         return result.get("data", {})
 
@@ -235,8 +276,8 @@ class GMGNClient:
         """Current token holdings + unrealized PnL."""
         result = await self._request(
             "GET",
-            "/api/v1/user/wallet_holdings",
-            params={"chain": chain, "wallet": wallet, "limit": limit},
+            "/v1/user/wallet_holdings",
+            params={"chain": chain, "wallet_address": wallet, "limit": limit},
         )
         return result.get("data", [])
 
@@ -250,8 +291,8 @@ class GMGNClient:
         """Recent transaction history (buys + sells)."""
         result = await self._request(
             "GET",
-            "/api/v1/user/wallet_activity",
-            params={"chain": chain, "wallet": wallet, "limit": limit},
+            "/v1/user/wallet_activity",
+            params={"chain": chain, "wallet_address": wallet, "limit": limit},
         )
         return result.get("data", [])
 
@@ -271,7 +312,7 @@ class GMGNClient:
         """
         result = await self._request(
             "GET",
-            "/api/v1/token/info",
+            "/v1/token/info",
             params={"chain": chain, "address": address},
         )
         return result.get("data", {})
@@ -283,10 +324,17 @@ class GMGNClient:
         interval: Literal["1m", "5m", "1h", "6h", "24h"] = "1h",
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """Trending tokens — minimum 1-minute window."""
+        """Trending tokens — minimum 1-minute window.
+
+        Backed by OpenAPI endpoint `/v1/market/rank` (called "trending swaps" in
+        the official gmgn-cli, which maps it from CLI flag --interval to query
+        param `interval`). Max limit per docs: 100.
+        """
+        if not 1 <= limit <= 100:
+            raise ValueError("limit harus 1-100")
         result = await self._request(
             "GET",
-            "/api/v1/market/trending",
+            "/v1/market/rank",
             params={"chain": chain, "interval": interval, "limit": limit},
         )
         return result.get("data", [])
