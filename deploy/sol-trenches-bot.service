@@ -1,0 +1,56 @@
+[Unit]
+# Solana Sniper Bot — systemd unit adapted for the Tencent Cloud Lighthouse
+# Ubuntu setup (default `ubuntu` user, repo at /home/ubuntu/SOL-trenches-bot).
+# The legacy deploy/solana-bot.service assumes a dedicated `bot` user — keep
+# this file when running as the default Lighthouse user; use the legacy one
+# after creating a hardened service account.
+Description=Solana Sniper Bot (ubuntu-user variant)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+# Hard requirements so systemd refuses to start the bot when the DB or cache
+# is down. Disable these if running Postgres/Redis on a remote host.
+Requires=postgresql.service redis-server.service
+
+[Service]
+# Type=simple keeps it foolproof — no sd_notify integration required. Switch
+# to Type=notify + add the sd_notify() call from the existing
+# deploy/solana-bot.service header if you want WatchdogSec-based liveness.
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+WorkingDirectory=/home/ubuntu/SOL-trenches-bot
+# venv binaries first so `python` resolves to the project's interpreter.
+Environment="PATH=/home/ubuntu/SOL-trenches-bot/venv/bin:/usr/local/bin:/usr/bin:/bin"
+# pydantic-settings reads `secrets/.env` automatically (see src/config.py).
+# Make sure secrets/.env is chmod 600 owned by ubuntu:ubuntu.
+
+ExecStart=/home/ubuntu/SOL-trenches-bot/venv/bin/python -m src.main
+
+# Restart strategy: any non-zero exit OR crash → wait 10s → start again.
+# Cap rapid-failure loops: max 5 restarts within 300s, otherwise give up.
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Pipe stdout/stderr to journalctl so `journalctl -u sol-trenches-bot -f`
+# shows live logs. Optionally also append to a flat file for grep speed.
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits — tuned for the 2vCPU/2GB Lighthouse Singapore box.
+LimitNOFILE=65536
+MemoryMax=1500M
+CPUWeight=80
+
+# Security hardening (still loose enough that pip/data/log access works).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Allow writes to the repo's own data/logs/secrets paths only.
+ReadWritePaths=/home/ubuntu/SOL-trenches-bot/data /home/ubuntu/SOL-trenches-bot/logs /home/ubuntu/SOL-trenches-bot/secrets
+
+[Install]
+WantedBy=multi-user.target
