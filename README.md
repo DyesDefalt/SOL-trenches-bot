@@ -642,9 +642,11 @@ Each token scored 0-100 across **16 components** (Phase 10 adds 4 new):
 | 16 | **Pump.fun fee-claim** ⭐ | 0 → +15 | On-chain fee distribution event detected (Phase 10) |
 
 Final score:
-- **≥ 75 → AUTO BUY** (default threshold; configurable per recipe)
-- **65-74 → ALERT** (sent to Telegram for manual review)
-- **< 65 → SKIP**
+- **≥ MIN_SCORE_TO_BUY → AUTO BUY** (default 60; tighten per recipe)
+- **MIN_SCORE_TO_ALERT → MIN_SCORE_TO_BUY → AI-GATED** — runs through the LLM rug-check agent (`AI_RUG_CHECK_ENABLED=true`). Approve → auto-execute. Reduce → execute at half size. Veto → drop with a Telegram notice. No manual review.
+- **< MIN_SCORE_TO_ALERT → SKIP**
+
+> Direct AUTO BUY signals also pass through the AI rug-check before execution, so high-score noise tokens don't slip past unchecked. AI verdict is included in every BUY confirmation message.
 
 Plus **macro regime multiplier** (0.0-1.5x) applied to position size at execution time.
 

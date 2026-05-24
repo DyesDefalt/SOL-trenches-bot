@@ -138,6 +138,10 @@ class Bot:
         self.fib_calculator = None
         self.callback_router = None
 
+        # AI gate (rug-check on every actionable signal)
+        self.llm_client = None
+        self.rug_check_agent = None
+
         # Infra
         self.db: Database | None = None
         self.wallet: WalletManager | None = None
@@ -373,6 +377,31 @@ class Bot:
             except Exception as e:
                 log.warning("meme_scorer_init_failed", error=str(e))
 
+        # AI rug-check agent — runs on every BUY *and* every ALERT so the
+        # bot is fully autonomous (no manual review). Uses llm_provider so
+        # it respects LLM_PROVIDER=openclaw with openrouter fallback.
+        if settings.ai_enabled and settings.ai_rug_check_enabled:
+            try:
+                from src.ai.llm_provider import get_llm_client as _get_llm
+                from src.ai.rug_check_agent import RugCheckAgent
+                self.llm_client = _get_llm()
+                self.rug_check_agent = RugCheckAgent(self.llm_client)
+                log.info(
+                    "rug_check_agent_initialized",
+                    provider=settings.llm_provider,
+                    fallback=settings.llm_fallback_provider,
+                )
+            except Exception as e:
+                log.warning("rug_check_agent_init_failed", error=str(e))
+                self.llm_client = None
+                self.rug_check_agent = None
+        else:
+            log.info(
+                "rug_check_agent_disabled",
+                ai_enabled=settings.ai_enabled,
+                rug_check_enabled=settings.ai_rug_check_enabled,
+            )
+
         # Phase 10.6: Fibonacci entry calculator
         if getattr(settings, "fib_entry_enabled", False) and self.gecko:
             try:
@@ -508,15 +537,13 @@ class Bot:
                 break
 
             if result.action == "BUY":
-                await self._execute_buy(result)
-            elif result.action == "ALERT" and self.telegram:
-                await self.telegram.send_alert(
-                    f"⚡ <b>SIGNAL</b> {result.token.symbol or result.token.address[:8]}\n"
-                    f"Score: {result.score:.0f} (ALERT, manual review)\n"
-                    f"SM count: {result.token.smart_money_count}\n"
-                    f"MCAP: ${result.token.mcap_usd:,.0f}\n"
-                    f"<code>{result.token.address}</code>"
-                )
+                await self._execute_buy(result, source="BUY")
+            elif result.action == "ALERT":
+                # Fully automated: route ALERT-band signals through AI rug-check.
+                # If AI approves → execute. If AI vetos → drop silently. If AI
+                # is unavailable → fall back to a single informational notice
+                # (no "manual review" wording — bot is autonomous).
+                await self._handle_alert(result)
 
             # Persist signal ke DB (audit trail)
             try:
@@ -534,12 +561,155 @@ class Bot:
             except Exception as e:
                 log.warning("signal_persist_failed", error=str(e))
 
-    async def _execute_buy(self, result) -> None:  # type: ignore[no-untyped-def]
-        """Open new position based on score result."""
+    async def _ai_rug_gate(self, result):  # type: ignore[no-untyped-def]
+        """Run the LLM rug-check agent against a score result.
+
+        Returns a tuple ``(verdict, rug_check)`` where ``verdict`` is one of:
+            "APPROVE"      → safe to execute
+            "REDUCE_SIZE"  → execute with halved size
+            "VETO"         → skip
+            "UNAVAILABLE"  → AI offline / not configured / call failed
+
+        ``rug_check`` is the raw RugCheckResult (or None when unavailable).
+        """
+        if self.rug_check_agent is None:
+            return ("UNAVAILABLE", None)
+
+        token = result.token
+        try:
+            rug = await self.rug_check_agent.assess(
+                token_address=token.address,
+                symbol=token.symbol or token.address[:8],
+                mcap_usd=token.mcap_usd,
+                liquidity_usd=token.liquidity_usd,
+                age_minutes=int(getattr(token, "age_minutes", 0) or 0),
+                holder_count=int(getattr(token, "holder_count", 0) or 0),
+                top10_pct=float(getattr(token, "top10_holders_pct", 0.0) or 0.0),
+                dev_holding_pct=float(getattr(token, "dev_holding_pct", 0.0) or 0.0),
+                bundle_supply_pct=float(getattr(token, "bundle_supply_pct", 0.0) or 0.0),
+                lp_burned=bool(getattr(token, "lp_burned", False)),
+                is_renounced=bool(getattr(token, "is_renounced", False)),
+                gmgn_security_score=int(getattr(token, "gmgn_security_score", 0) or 0),
+                smart_money_count=int(token.smart_money_count or 0),
+                smart_money_buyers=list(token.smart_money_buyers or []),
+            )
+        except Exception as e:
+            log.warning("ai_rug_check_failed", token=token.address[:8], error=str(e))
+            return ("UNAVAILABLE", None)
+
+        if rug is None:
+            return ("UNAVAILABLE", None)
+
+        # Map LLM recommendation to a verdict, applying confidence floor on VETO
+        rec = (rug.recommendation or "").upper()
+        if rec == "VETO" and rug.veto and rug.confidence >= settings.ai_rug_veto_min_confidence:
+            return ("VETO", rug)
+        if rec == "REDUCE_SIZE":
+            return ("REDUCE_SIZE", rug)
+        # APPROVE — or low-confidence VETO (we don't trust uncertain vetos)
+        return ("APPROVE", rug)
+
+    async def _handle_alert(self, result) -> None:  # type: ignore[no-untyped-def]
+        """ALERT-band signal: ask AI, auto-execute on approve, drop on veto."""
+        verdict, rug = await self._ai_rug_gate(result)
+        token = result.token
+        symbol = token.symbol or token.address[:8]
+
+        if verdict == "APPROVE":
+            log.info(
+                "alert_ai_approve_execute",
+                token=symbol,
+                score=result.score,
+                confidence=getattr(rug, "confidence", None),
+            )
+            await self._execute_buy(result, source="ALERT", ai_rug=rug)
+            return
+
+        if verdict == "REDUCE_SIZE":
+            log.info(
+                "alert_ai_reduce_size_execute",
+                token=symbol,
+                score=result.score,
+                confidence=getattr(rug, "confidence", None),
+            )
+            await self._execute_buy(result, source="ALERT", ai_rug=rug, size_multiplier=0.5)
+            return
+
+        if verdict == "VETO":
+            log.info(
+                "alert_ai_veto",
+                token=symbol,
+                score=result.score,
+                confidence=rug.confidence if rug else None,
+                red_flags=rug.red_flags if rug else None,
+            )
+            if self.telegram:
+                flags = ", ".join((rug.red_flags or [])[:3]) if rug else ""
+                await self.telegram.send_alert(
+                    f"🤖 <b>AI VETO</b> {symbol}\n"
+                    f"Score: {result.score:.0f}  conf: {rug.confidence:.2f}\n"
+                    f"Reason: {rug.reason[:120] if rug else 'n/a'}\n"
+                    f"Flags: {flags}\n"
+                    f"<code>{token.address}</code>"
+                )
+            return
+
+        # UNAVAILABLE — AI offline. Send a single info notice (no "manual
+        # review" wording; bot stays autonomous and just skips).
+        if self.telegram:
+            await self.telegram.send_alert(
+                f"⚡ <b>SIGNAL</b> {symbol}\n"
+                f"Score: {result.score:.0f} (AI offline — auto-skipped)\n"
+                f"SM count: {token.smart_money_count}\n"
+                f"MCAP: ${token.mcap_usd:,.0f}\n"
+                f"<code>{token.address}</code>"
+            )
+
+    async def _execute_buy(
+        self,
+        result,  # type: ignore[no-untyped-def]
+        source: str = "BUY",
+        ai_rug=None,  # type: ignore[no-untyped-def]
+        size_multiplier: float = 1.0,
+    ) -> None:
+        """Open new position based on score result.
+
+        Args:
+            result:           score result from SignalEngine.
+            source:           "BUY" (gate AI here) or "ALERT" (already gated upstream).
+            ai_rug:           pre-computed RugCheckResult when source=="ALERT".
+            size_multiplier:  scales sol_amount (e.g. 0.5 for AI REDUCE_SIZE).
+        """
         if not self.execution or not self.scoring or not self.position_manager or not self.db:
             return
 
         token = result.token
+        symbol = token.symbol or token.address[:8]
+
+        # AI rug-check gate for direct BUY signals (ALERT path already ran it).
+        if source == "BUY" and self.rug_check_agent is not None:
+            verdict, rug = await self._ai_rug_gate(result)
+            if verdict == "VETO":
+                log.info(
+                    "buy_ai_veto",
+                    token=symbol,
+                    score=result.score,
+                    confidence=rug.confidence if rug else None,
+                    red_flags=rug.red_flags if rug else None,
+                )
+                if self.telegram:
+                    flags = ", ".join((rug.red_flags or [])[:3]) if rug else ""
+                    await self.telegram.send_alert(
+                        f"🤖 <b>AI VETO</b> {symbol}\n"
+                        f"Score: {result.score:.0f}  conf: {rug.confidence:.2f}\n"
+                        f"Reason: {rug.reason[:120] if rug else 'n/a'}\n"
+                        f"Flags: {flags}\n"
+                        f"<code>{token.address}</code>"
+                    )
+                return
+            if verdict == "REDUCE_SIZE":
+                size_multiplier = min(size_multiplier, 0.5)
+            ai_rug = rug
 
         # Phase 9: Macro regime throttles position size (or zero if extreme risk-off)
         macro_mult = (
@@ -548,10 +718,11 @@ class Bot:
             else 1.0
         )
         sol_amount = self.scoring.position_size_sol(result.score, macro_multiplier=macro_mult)
+        sol_amount *= size_multiplier
         if sol_amount <= 0:
             log.info(
                 "buy_skipped_macro_throttle",
-                token=token.symbol or token.address[:8],
+                token=symbol,
                 score=result.score,
                 macro_regime=token.macro_regime_level,
                 macro_mult=macro_mult,
@@ -560,14 +731,18 @@ class Bot:
 
         log.info(
             "executing_buy",
-            token=token.symbol or token.address[:8],
+            token=symbol,
+            source=source,
             score=result.score,
             sol_amount=sol_amount,
+            size_mult=size_multiplier,
             sm_count=token.smart_money_count,
             macro_regime=token.macro_regime_level,
             macro_mult=macro_mult,
             narrative_match=token.narrative_match,
             crossref_listed=token.is_listed_on_coingecko,
+            ai_recommendation=getattr(ai_rug, "recommendation", None),
+            execution_provider=settings.execution_provider,
         )
 
         trade = await self.execution.buy_token(
@@ -612,12 +787,16 @@ class Bot:
 
         if self.telegram:
             mode = "🧪 DRY" if trade.dry_run else "💵 LIVE"
+            ai_tag = ""
+            if ai_rug is not None:
+                ai_tag = f"\nAI: {ai_rug.recommendation} (conf {ai_rug.confidence:.2f})"
+            via = settings.execution_provider.upper()
             await self.telegram.send_alert(
-                f"{mode} <b>BUY</b> {token.symbol or token.address[:8]}\n"
+                f"{mode} <b>BUY</b> ({source} via {via}) {token.symbol or token.address[:8]}\n"
                 f"Score: {result.score:.0f}\n"
                 f"SM: {token.smart_money_count} wallets\n"
                 f"Size: {sol_amount} SOL\n"
-                f"Price impact: {trade.price_impact_pct:.1f}%\n"
+                f"Price impact: {trade.price_impact_pct:.1f}%{ai_tag}\n"
                 f"<code>{token.address}</code>"
             )
 
@@ -764,6 +943,8 @@ class Bot:
         # Close clients in reverse dependency order
         # (intel layer closed first, then transport clients, then infra)
         ordered_clients = [
+            # AI gate (LLM provider) — close first so any in-flight LLM call aborts
+            self.llm_client,
             # Phase 9 extended intel (depend on base clients) — close first
             self.coingecko,
             self.messari,
