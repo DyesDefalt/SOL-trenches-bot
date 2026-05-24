@@ -413,10 +413,24 @@ class Bot:
             gmgn_swap=self.gmgn_swap,
         )
 
-        # Get initial balance untuk circuit breaker
-        balance_lamports = await self.rpc.get_balance(self.wallet.address)
-        balance_sol = balance_lamports / 1_000_000_000
-        log.info("wallet_balance", sol=balance_sol)
+        # Get initial balance untuk circuit breaker.
+        # DRY_RUN (paper trading): use the configurable virtual balance so the
+        # user can simulate trading with any amount without funding the real
+        # wallet. LIVE mode: always pull the on-chain balance.
+        if settings.dry_run:
+            balance_sol = settings.paper_initial_balance_sol
+            log.info(
+                "paper_balance_initialized",
+                sol=balance_sol,
+                note=(
+                    "DRY_RUN mode — using virtual balance from "
+                    "PAPER_INITIAL_BALANCE_SOL. Real wallet untouched."
+                ),
+            )
+        else:
+            balance_lamports = await self.rpc.get_balance(self.wallet.address)
+            balance_sol = balance_lamports / 1_000_000_000
+            log.info("wallet_balance", sol=balance_sol)
 
         self.cb = CircuitBreaker(db=self.db, telegram=None)
         await self.cb.initialize(starting_balance_sol=balance_sol)
@@ -654,10 +668,11 @@ class Bot:
         # Send startup alert
         if self.telegram:
             mode = "🧪 DRY_RUN" if settings.dry_run else "💵 LIVE"
+            balance_label = "Virtual balance" if settings.dry_run else "Wallet balance"
             await self.telegram.send_alert(
                 f"🚀 <b>Bot started</b> ({mode})\n"
                 f"Wallet: <code>{self.wallet.address[:8]}...{self.wallet.address[-6:]}</code>\n"
-                f"Balance: {self.cb.state.current_balance_sol:.4f} SOL"
+                f"{balance_label}: {self.cb.state.current_balance_sol:.4f} SOL"
             )
 
         # Start background tasks

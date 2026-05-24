@@ -78,6 +78,14 @@ class Settings(BaseSettings):
     priority_fee_microlamports: int = 10_000
     jito_tip_lamports: int = 1_000_000
 
+    # --- Paper trading (DRY_RUN) virtual balance ---
+    # When DRY_RUN=True, bot ignores the real wallet's SOL balance and uses
+    # this virtual amount instead. Lets you simulate trading with any amount
+    # without funding the wallet. Bot updates the virtual balance based on
+    # simulated P&L during the session. Only used when DRY_RUN=True.
+    # When DRY_RUN=False (live trading), the bot reads the real wallet balance.
+    paper_initial_balance_sol: float = 1.0
+
     # --- Position management ---
     tp1_gain_pct: float = 80
     tp1_sell_pct: float = 30
