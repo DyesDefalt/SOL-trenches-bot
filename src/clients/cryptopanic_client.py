@@ -1,12 +1,20 @@
 """
-CryptoPanic API async client.
+CryptoPanic API async client (v2).
 
 CryptoPanic aggregates crypto news with community voting for bullish/bearish
-sentiment. Public API requires auth_token as query parameter (NOT header).
+sentiment. Authentication uses `auth_token` as a QUERY PARAMETER (not a
+header).
 
-Base URL: https://cryptopanic.com/api/v1
-Auth: auth_token query param
-Rate limit: 5 req/sec public — we use TokenBucket(rps=2.0, burst=5)
+⚠️ v1 IS DEPRECATED — returns 404 HTML page on /api/v1/posts/.
+The current API is at /api/{API_PLAN}/v2/ where API_PLAN matches the user's
+subscription tier slug: `developer`, `growth`, or `enterprise`.
+
+⚠️ The free Developer plan is being discontinued **April 1, 2026** — a paid
+plan is required for continued access.
+
+Base URL: https://cryptopanic.com/api/{API_PLAN}/v2/  (configurable)
+Auth: auth_token query param (every request)
+Rate limit: depends on tier; we keep TokenBucket(rps=2.0, burst=5).
 
 Docs: https://cryptopanic.com/developers/api/
 """
@@ -62,10 +70,23 @@ class CryptoPanicClient:
             posts = await client.get_solana_news(filter="hot")
     """
 
-    BASE_URL = "https://cryptopanic.com/api/v1"
+    # Base host without the plan segment — that's filled in __init__.
+    _BASE_HOST = "https://cryptopanic.com/api"
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        api_plan: str | None = None,
+    ) -> None:
         self._api_key = api_key or settings.cryptopanic_api_key
+        # API plan slug picks the path segment between /api/ and /v2/.
+        # Valid values per https://cryptopanic.com/developers/api/:
+        # `developer`, `growth`, `enterprise`. Default to `developer`.
+        self._api_plan = (
+            api_plan or settings.cryptopanic_api_plan or "developer"
+        ).strip().lower()
+
+        self.BASE_URL = f"{self._BASE_HOST}/{self._api_plan}/v2"
 
         self._http = BaseHTTPClient(
             base_url=self.BASE_URL,

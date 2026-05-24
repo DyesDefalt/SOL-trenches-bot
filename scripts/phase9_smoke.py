@@ -29,7 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.clients.alphavantage_client import AlphaVantageClient
 from src.clients.coingecko_client import CoinGeckoClient
-from src.clients.cryptopanic_client import CryptoPanicClient
+from src.clients.cryptocurrencycv_client import CryptoCurrencyCvClient
+from src.clients.cryptopanic_client import CryptoPanicClient  # legacy; kept available
 from src.clients.cryptoquant_client import CryptoQuantClient
 from src.clients.messari_client import MessariClient
 from src.ai.tokito_client import TokitoClient
@@ -103,17 +104,36 @@ async def test_alphavantage() -> bool:
 
 
 async def test_cryptopanic() -> bool:
-    print("\n[3/9] CryptoPanic")
-    if not settings.cryptopanic_api_key:
-        skip("Skipped — CRYPTOPANIC_API_KEY not set")
-        return True
-    async with CryptoPanicClient() as client:
+    """
+    News slot — now backed by cryptocurrency.cv (free, no API key needed).
+
+    Kept the function name as test_cryptopanic so the test table renames in
+    one place. CryptoPanic v1 is retired; v2 requires a paid plan after
+    April 1, 2026 — we've migrated to cryptocurrency.cv which aggregates
+    130+ sources for free.
+    """
+    print("\n[3/9] News (cryptocurrency.cv)")
+    async with CryptoCurrencyCvClient() as client:
         try:
             posts = await client.get_solana_news(filter="hot", limit=5)
             if posts:
-                ok(f"Solana hot news: {len(posts)} posts (top: '{posts[0].get('title', '?')[:60]}...')")
+                top = posts[0].get("title", "?")[:60]
+                ok(f"Solana hot news: {len(posts)} posts (top: '{top}...')")
             else:
                 warn("No posts returned")
+
+            # Bonus: probe the asset-sentiment endpoint that CryptoPanic
+            # didn't expose. Failure here is non-fatal — main path stays
+            # green so the suite reports the news source as healthy.
+            try:
+                sentiment = await client.get_asset_sentiment("SOL", period="24h")
+                overall = sentiment.get("overall") or sentiment.get("market", {}).get("overall")
+                score = sentiment.get("score") or sentiment.get("market", {}).get("score")
+                if overall:
+                    ok(f"SOL 24h sentiment: {overall} (score={score})")
+            except Exception as exc:
+                warn(f"Sentiment probe non-fatal error: {exc}")
+
             return True
         except Exception as e:
             fail(f"Error: {e}")
@@ -215,12 +235,11 @@ async def test_macro_regime() -> bool:
 
 async def test_news_aggregator() -> bool:
     print("\n[8/9] NewsAggregator")
-    cp = CryptoPanicClient() if settings.cryptopanic_api_key else None
+    # cryptocurrency.cv is free + no API key — always instantiate.
+    # CryptoPanic (paid) used as additional source only if user has a key.
+    news = CryptoCurrencyCvClient()
     ms = MessariClient() if settings.messari_api_key else None
-    if not cp and not ms:
-        skip("Skipped — neither CryptoPanic nor Messari configured")
-        return True
-    agg = NewsAggregator(cryptopanic=cp, messari=ms)
+    agg = NewsAggregator(news_client=news, messari=ms)
     try:
         sentiment = await agg.get_market_sentiment()
         ok(f"Market sentiment: overall={sentiment.overall_sentiment:.2f}, "
@@ -232,8 +251,7 @@ async def test_news_aggregator() -> bool:
         fail(f"Error: {e}")
         return False
     finally:
-        if cp:
-            await cp.close()
+        await news.close()
         if ms:
             await ms.close()
 

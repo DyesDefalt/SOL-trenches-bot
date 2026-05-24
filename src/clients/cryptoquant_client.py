@@ -26,6 +26,28 @@ from src.infra.rate_limiter import TokenBucket
 log = get_logger(__name__)
 
 _KEY_WARNING_EMITTED = False
+# Dedup the 401/403 tier-forbidden warning per endpoint slug per process. The
+# macro regime detector polls every few minutes — without dedup the same
+# "Personal-tier doesn't include this endpoint" warning would log every cycle.
+_TIER_FORBIDDEN_LOGGED: set[str] = set()
+
+
+def _log_tier_forbidden_once(endpoint: str, status: int) -> None:
+    """Log the tier-forbidden warning at most once per endpoint per process."""
+    if endpoint in _TIER_FORBIDDEN_LOGGED:
+        return
+    _TIER_FORBIDDEN_LOGGED.add(endpoint)
+    log.warning(
+        "cryptoquant_auth_error",
+        endpoint=endpoint,
+        status=status,
+        note=(
+            "401/403 means either the API key is invalid OR this endpoint "
+            "is not in your plan tier (Personal plan excludes most Pro "
+            "on-chain metrics). Run client.discover_endpoints() or curl "
+            "/v1/my/discovery/endpoints to list what's actually available."
+        ),
+    )
 
 
 class CryptoQuantClient:
@@ -83,6 +105,55 @@ class CryptoQuantClient:
         await self._limiter.acquire()
         return await self._http.get(path, params=params)
 
+    # ------------------------------------------------------------------
+    # Plan tier discovery
+    # ------------------------------------------------------------------
+
+    async def discover_endpoints(self) -> list[str]:
+        """
+        Return the list of API paths this account's plan can access.
+
+        CryptoQuant exposes `/v1/my/discovery/endpoints` (visible on the API
+        Settings page at https://cryptoquant.com/account/api) which lists
+        the endpoints the current API key is authorized to call. The
+        Personal-use plan excludes most Pro on-chain metrics (exchange
+        flows, MVRV, funding rates) — use this method to inspect what
+        you can actually fetch before adjusting MacroRegime's expectations.
+
+        Returns [] on error (caller should treat as "unknown — try everything").
+        """
+        try:
+            result = await self._get("/my/discovery/endpoints")
+        except HTTPError as e:
+            log.warning("cryptoquant_discovery_http_error", status=e.status)
+            return []
+        except Exception as e:  # noqa: BLE001
+            log.warning("cryptoquant_discovery_error", error=str(e))
+            return []
+
+        # Response can be flat {data: [...]} or wrapped {result: {data: [...]}}.
+        data: object = None
+        if isinstance(result, dict):
+            if isinstance(result.get("data"), list):
+                data = result["data"]
+            else:
+                inner = result.get("result")
+                if isinstance(inner, dict) and isinstance(inner.get("data"), list):
+                    data = inner["data"]
+        data = data or []
+
+        # Entries may be strings or dicts with `endpoint`/`path`/`url` key.
+        out: list[str] = []
+        if isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, str):
+                    out.append(entry)
+                elif isinstance(entry, dict):
+                    p = entry.get("endpoint") or entry.get("path") or entry.get("url")
+                    if isinstance(p, str):
+                        out.append(p)
+        return out
+
     @staticmethod
     def _ms_ago(seconds: int) -> int:
         """Return unix timestamp in milliseconds, `seconds` ago."""
@@ -136,12 +207,7 @@ class CryptoQuantClient:
             return self._normalize(result)
         except HTTPError as e:
             if e.status in (401, 403):
-                log.warning(
-                    "cryptoquant_auth_error",
-                    endpoint="exchange_flows",
-                    status=e.status,
-                    note="Check API key or plan tier — Pro endpoint may require upgrade.",
-                )
+                _log_tier_forbidden_once("exchange_flows", e.status)
             else:
                 log.error("cryptoquant_exchange_flows_error", status=e.status, error=str(e))
             return {}
@@ -172,12 +238,7 @@ class CryptoQuantClient:
             return self._normalize(result)
         except HTTPError as e:
             if e.status in (401, 403):
-                log.warning(
-                    "cryptoquant_auth_error",
-                    endpoint="mvrv_ratio",
-                    status=e.status,
-                    note="Check API key or plan tier — Pro endpoint may require upgrade.",
-                )
+                _log_tier_forbidden_once("mvrv_ratio", e.status)
             else:
                 log.error("cryptoquant_mvrv_ratio_error", status=e.status, error=str(e))
             return {}
@@ -208,12 +269,7 @@ class CryptoQuantClient:
             return self._normalize(result)
         except HTTPError as e:
             if e.status in (401, 403):
-                log.warning(
-                    "cryptoquant_auth_error",
-                    endpoint="funding_rates",
-                    status=e.status,
-                    note="Check API key or plan tier — Pro endpoint may require upgrade.",
-                )
+                _log_tier_forbidden_once("funding_rates", e.status)
             else:
                 log.error("cryptoquant_funding_rates_error", status=e.status, error=str(e))
             return {}
@@ -245,12 +301,7 @@ class CryptoQuantClient:
             return self._normalize(result)
         except HTTPError as e:
             if e.status in (401, 403):
-                log.warning(
-                    "cryptoquant_auth_error",
-                    endpoint="coinbase_premium",
-                    status=e.status,
-                    note="Check API key or plan tier — Pro endpoint may require upgrade.",
-                )
+                _log_tier_forbidden_once("coinbase_premium", e.status)
             else:
                 log.error("cryptoquant_coinbase_premium_error", status=e.status, error=str(e))
             return {}

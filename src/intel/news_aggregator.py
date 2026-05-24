@@ -25,8 +25,14 @@ from typing import TYPE_CHECKING
 from src.infra.logger import get_logger
 
 if TYPE_CHECKING:
+    # The aggregator uses duck-typed news clients — anything implementing
+    # `get_solana_news`, `get_token_news`, `get_trending_currencies` works.
+    # Prefer CryptoCurrencyCvClient (free, no key, replaces CryptoPanic v1).
+    from src.clients.cryptocurrencycv_client import CryptoCurrencyCvClient
     from src.clients.cryptopanic_client import CryptoPanicClient
     from src.clients.messari_client import MessariClient
+
+    NewsClient = CryptoCurrencyCvClient | CryptoPanicClient
 
 log = get_logger(__name__)
 
@@ -123,23 +129,35 @@ def _assess_fud_severity(votes: dict) -> str:
 
 class NewsAggregator:
     """
-    Unified news + narrative intelligence from CryptoPanic + Messari.
+    Unified news + narrative intelligence from a news client + Messari.
+
+    The news_client is duck-typed — currently supports either:
+    - CryptoCurrencyCvClient (RECOMMENDED, free, no key)
+    - CryptoPanicClient (legacy; requires paid plan post-April-2026)
 
     Both clients can be None (graceful degradation).
 
     Usage::
 
-        aggregator = NewsAggregator(cryptopanic_client, messari_client)
-        sentiment = await aggregator.get_market_sentiment()
-        narrative = await aggregator.check_token_narrative("BONK")
+        # Preferred — cryptocurrency.cv (free):
+        from src.clients.cryptocurrencycv_client import CryptoCurrencyCvClient
+        aggregator = NewsAggregator(news_client=CryptoCurrencyCvClient(),
+                                    messari=messari_client)
+
+        # Legacy still works:
+        aggregator = NewsAggregator(cryptopanic=cryptopanic_client, ...)
     """
 
     def __init__(
         self,
-        cryptopanic: "CryptoPanicClient | None" = None,
+        news_client: "NewsClient | None" = None,
         messari: "MessariClient | None" = None,
+        cryptopanic: "CryptoPanicClient | None" = None,
     ) -> None:
-        self._cp = cryptopanic
+        # `cryptopanic=` kept for backward-compat with existing callers; the
+        # canonical parameter is `news_client`. If both are provided,
+        # news_client wins.
+        self._cp = news_client or cryptopanic
         self._messari = messari
 
     # ------------------------------------------------------------------

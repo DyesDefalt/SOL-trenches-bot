@@ -502,7 +502,7 @@ nano secrets/.env  # fill credentials (see below)
 | Variable | Get From |
 |---|---|
 | `HELIUS_API_KEY` | https://helius.dev (free tier) |
-| `GMGN_API_KEY` | https://gmgn.ai/ai (Ed25519 keypair, see below) |
+| `GMGN_API_KEY` | https://gmgn.ai/ai → login (Phantom or Telegram) → "Create API Key" → upload Ed25519 public key (see below). For quick testing, use the public demo key `gmgn_solbscbaseethmonadtron`. |
 | `WALLET_PUBLIC_KEY` | `make wallet-gen` (NEW wallet, never reuse main) |
 | `TELEGRAM_BOT_TOKEN` | BotFather on Telegram |
 | `TELEGRAM_CHAT_ID` | Your Telegram user ID |
@@ -510,11 +510,48 @@ nano secrets/.env  # fill credentials (see below)
 
 **GMGN setup:**
 
+> **Important** — GMGN has two hosts with different roles:
+> - `https://gmgn.ai` — consumer site where you create the API key (requires login)
+> - `https://openapi.gmgn.ai` — the actual API server the bot talks to (no login, just `X-APIKEY` header)
+>
+> The bot client already defaults to `openapi.gmgn.ai`. You only visit `gmgn.ai` once, to generate the key.
+
+**Option A — Use the public demo key (fastest, for testing only):**
+
+GMGN's official Readme publishes a low-volume demo key:
 ```bash
-make gmgn-keygen
-# Upload secrets/gmgn_public.pem to gmgn.ai/ai dashboard
-# Copy returned API key to secrets/.env
+# In secrets/.env:
+GMGN_API_KEY=gmgn_solbscbaseethmonadtron
 ```
+Skip to `make smoke`. This works immediately but is rate-limited and meant for testing the connection only. For real use, get your own key:
+
+**Option B — Generate your own API key (recommended for live trading):**
+
+1. **Generate Ed25519 keypair locally on the VPS:**
+   ```bash
+   make gmgn-keygen
+   # Creates secrets/gmgn_private.pem + secrets/gmgn_public.pem
+   ```
+
+2. **Open https://gmgn.ai/ai in your browser** (laptop, not VPS — you need a real browser).
+
+3. **Log in first.** Click the wallet/profile icon at the top-right of the GMGN header.
+   - Choose **Phantom Wallet** OR **Telegram** (both work — pick whichever you already use).
+   - This step is mandatory: without login, the "Create API Key" panel below stays hidden.
+
+4. **Once logged in, click the green "Create API Key" button** in the hero section (or scroll to the `#api-management` panel).
+
+5. **Paste your `secrets/gmgn_public.pem` content** into the public-key form. **Include the `-----BEGIN PUBLIC KEY-----` and `-----END PUBLIC KEY-----` lines** — strip them and it will reject.
+
+6. **Submit.** GMGN returns your personal `GMGN_API_KEY` — copy it into `secrets/.env`:
+   ```bash
+   # In secrets/.env:
+   GMGN_API_KEY=<paste-key-here>
+   ```
+
+7. **Keep `secrets/gmgn_private.pem` on the VPS** — `chmod 600` it. The private key is only needed when you wire trading (swap / order / follow_wallet endpoints, which use Ed25519 request signing). Read-only endpoints (market, token, portfolio) don't sign requests.
+
+> **Heads up** — the `gmgn.ai/ai` page is mostly a marketing landing until you log in. If you see only the hero ("For Agent, By Agent") and don't see a public-key form, you're not logged in yet. Click the top-right login button first.
 
 **Wallet setup (⚠️ on your LAPTOP, not VPS):**
 

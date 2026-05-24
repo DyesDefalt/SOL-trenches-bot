@@ -173,13 +173,27 @@ class Settings(BaseSettings):
     ai_tuner_enabled: bool = False
     ai_wallet_blacklist_min_confidence: float = 0.85
 
-    # --- CryptoPanic (Phase 9 news) ---
+    # --- News provider (Phase 9) ---
+    # PREFERRED: cryptocurrency.cv (Free Crypto News API). No API key,
+    # no signup, 130+ aggregated sources, built-in sentiment + Solana category.
+    # Drop-in replacement for CryptoPanic — phase9_smoke + NewsAggregator
+    # now default to this client (CryptoCurrencyCvClient).
+    cryptocurrencycv_base_url: str = "https://cryptocurrency.cv"
+
+    # --- CryptoPanic (legacy / optional fallback) ---
+    # Kept for users with a paid plan. v1 was retired; v2 lives at
+    # /api/{plan}/v2/ where plan ∈ {developer, growth, enterprise}. The
+    # free Developer tier is being discontinued April 1, 2026. New
+    # deployments should use cryptocurrency.cv instead of paying CryptoPanic.
     cryptopanic_api_key: str = ""
-    cryptopanic_base_url: str = "https://cryptopanic.com/api/v1"
+    cryptopanic_api_plan: str = "developer"
+    cryptopanic_base_url: str = "https://cryptopanic.com/api/developer/v2"
 
     # --- Messari (Phase 9 cross-ref + news) ---
     messari_api_key: str = ""
-    messari_base_url: str = "https://data.messari.io/api/v1"
+    # Host migration: data.messari.io is gone, current host is api.messari.io.
+    # Paths also changed: /api/v1/assets/{slug}/profile -> /metrics/v1/assets/{slug}.
+    messari_base_url: str = "https://api.messari.io"
 
     # --- News & narrative feature flag (Phase 9) ---
     news_narrative_enabled: bool = True
@@ -198,8 +212,43 @@ class Settings(BaseSettings):
     tokito_base_url: str = "https://api.tokito.xyz/v1"
     tokito_model: str = "pecut-ai"
 
-    # --- LLM provider selection (Phase 9) ---
-    llm_provider: Literal["openrouter", "tokito"] = "openrouter"
+    # --- OpenClaw / 9router (recommended primary LLM) ---
+    # OpenAI-compatible multi-model relay (npm package `9router`, see
+    # https://9router.com). `sg-combo` is a CUSTOM COMBO defined in your
+    # 9router dashboard — it chains multiple providers with sticky round-robin
+    # and auto-fallback. Explicit ids like `cc/claude-sonnet-4-6`,
+    # `cx/gpt-5.5`, `gemini/gemini-3-flash-preview` are passed through
+    # unchanged. Only use models for providers you've connected in the
+    # 9router dashboard — unconfigured providers return 404
+    # `no_active_credentials_for_provider`.
+    # ⚠️ Default base URL is plain HTTP; switch to https:// if you re-host.
+    openclaw_api_key: str = ""
+    openclaw_base_url: str = "http://43.163.86.112:20128/v1"
+    openclaw_default_model: str = "sg-combo"
+
+    # --- OpenRouter default model (used as fallback) ---
+    # `openrouter/free` is OpenRouter's magic router that picks a free model
+    # matching the request's capability requirements (e.g. structured-output
+    # support when response_format=json_object is set). Zero cost, no need to
+    # maintain a list of free model ids. Replace with an explicit id like
+    # `google/gemini-2.0-flash-exp:free` or `meta-llama/llama-3.2-3b-instruct:free`
+    # if you want a specific free model. Use a paid id (without `:free` suffix)
+    # only if OPENROUTER_API_KEY has credits.
+    openrouter_default_model: str = "openrouter/free"
+
+    # --- LLM provider selection ---
+    # `llm_provider` = the PRIMARY client (Phase 9 default was openrouter).
+    # `llm_fallback_provider` = the SECONDARY client tried when primary returns
+    # None or raises. Set to "none" to disable fallback chaining entirely.
+    # New deployments using OpenClaw should pair it with openrouter fallback:
+    #   LLM_PROVIDER=openclaw
+    #   LLM_FALLBACK_PROVIDER=openrouter
+    # When fallback triggers, the caller's model name is REPLACED with each
+    # provider's own configured default (openclaw_default_model /
+    # openrouter_default_model / tokito_model) — primary-only model ids do
+    # not need to be valid on the fallback provider.
+    llm_provider: Literal["openrouter", "tokito", "openclaw"] = "openclaw"
+    llm_fallback_provider: Literal["none", "openrouter", "tokito", "openclaw"] = "openrouter"
 
     # --- Cross-ref feature flag (Phase 9) ---
     crossref_validation_enabled: bool = True

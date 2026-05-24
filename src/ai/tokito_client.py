@@ -89,7 +89,7 @@ class TokitoClient:
 
     async def complete_structured(
         self,
-        model: str,  # accepted for interface compat — always uses pecut-ai
+        model: str | None,  # accepted for interface compat — always uses pecut-ai
         system: str,
         user: str,
         response_model: type[T],

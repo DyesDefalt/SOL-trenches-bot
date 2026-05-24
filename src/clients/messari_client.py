@@ -4,11 +4,21 @@ Messari API async client.
 Messari provides crypto asset profiles, metrics, and news aggregation.
 Used for cross-referencing token fundamentals and finding news by asset slug.
 
-Base URL: https://data.messari.io/api/v1
-Auth: x-messari-api-key header
-Rate limit: 20 req/min free tier → TokenBucket(rps=0.3, burst=3)
+⚠️ Endpoint migration (verified May 2026 against docs.messari.io):
+- Host changed: `data.messari.io` -> `api.messari.io`
+- Path changed: `/api/v1/assets/{slug}/...` -> `/metrics/v1/assets/{slug}`
+- The new v1 single-asset endpoint returns category, contract addresses,
+  description, marketData, links, etc. inline — no `fields=` filter needed.
+- v2 list endpoint: `/metrics/v2/assets` (used for `find_slug_by_contract`).
+- News service appears to live under a different path (`/news/v1/...`); the
+  old `/news` endpoint is deprecated. We keep get_news methods returning []
+  as graceful degrade until the new path is confirmed by the user's plan.
 
-Docs: https://messari.io/api/docs
+Base URL: https://api.messari.io
+Auth: x-messari-api-key header
+Rate limit: 20 req/min free tier -> TokenBucket(rps=0.3, burst=3)
+
+Docs: https://docs.messari.io/api-reference/authentication
 """
 
 from __future__ import annotations
@@ -32,7 +42,7 @@ class MessariClient:
             profile = await client.get_asset_profile("solana")
     """
 
-    BASE_URL = "https://data.messari.io/api/v1"
+    BASE_URL = "https://api.messari.io"
 
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or settings.messari_api_key
@@ -77,12 +87,13 @@ class MessariClient:
 
         slug: e.g. "solana", "bonk", "dogwifhat"
         Returns profile dict or {} on error / 404.
+
+        Migrated to v1 metrics endpoint — returns category, contractAddresses,
+        marketData, links, etc. inline. No fields= filter needed; Messari
+        returns the full asset payload by default.
         """
-        params = {
-            "fields": "profile/general/overview,profile/general/category,profile/contract_addresses",
-        }
         try:
-            result = await self._get(f"/assets/{slug}/profile", params=params)
+            result = await self._get(f"/metrics/v1/assets/{slug}")
             return result.get("data", result)
         except HTTPError as e:
             if e.status == 404:
@@ -106,10 +117,23 @@ class MessariClient:
         Fetch asset market metrics, on-chain data, and exchange flows.
 
         Returns metrics dict or {} on error.
+
+        Migration note: the dedicated `/assets/{slug}/metrics` endpoint is
+        gone in the new API — marketData is now embedded inside the
+        single-asset response from `/metrics/v1/assets/{slug}`. We call that
+        same endpoint and extract the `marketData` field. Callers expecting
+        the old wrapper shape may need to read `data["marketData"]` instead
+        of `data` directly.
         """
         try:
-            result = await self._get(f"/assets/{slug}/metrics")
-            return result.get("data", result)
+            result = await self._get(f"/metrics/v1/assets/{slug}")
+            data = result.get("data", result)
+            # Old endpoint returned just the metrics dict; the new one
+            # nests marketData inside the full asset payload. Return that
+            # sub-object if present, else the whole payload (caller decides).
+            if isinstance(data, dict) and "marketData" in data:
+                return data.get("marketData") or {}
+            return data
         except HTTPError as e:
             if e.status == 404:
                 log.debug("messari_metrics_not_found", slug=slug)
@@ -191,29 +215,47 @@ class MessariClient:
         """
         Find Messari slug for a token given its contract address.
 
-        Uses /assets endpoint with contract_addresses field and filters locally.
+        Uses v2 assets list endpoint with `search` query (Messari's search
+        matches against slug/symbol/name/contract per docs.messari.io). The
+        legacy `fields=` filter is gone in v2 — we fetch standard listing
+        fields and check `contractAddresses` locally.
+
         Cached 24h since contract→slug mapping is stable.
         Returns slug string or None if not found.
         """
-        params = {
-            "fields": "slug,name,profile/contract_addresses",
+        # v2 endpoint accepts `search` (matches contract too) + `limit`.
+        # We pass the contract directly so Messari narrows the list server-side.
+        params: dict = {
+            "search": contract_address,
+            "limit": 20,
         }
         try:
-            result = await self._get("/assets", params=params)
+            result = await self._get("/metrics/v2/assets", params=params)
             data = result.get("data", [])
             if not isinstance(data, list):
                 return None
 
             contract_lower = contract_address.lower()
             for asset in data:
-                profile = asset.get("profile") or {}
-                contract_addrs = profile.get("contract_addresses") or []
+                # v2 schema flattens contractAddresses onto the asset; old
+                # v1 nested it under profile.contract_addresses. Support both
+                # shapes so we don't lose lookups if Messari adjusts the schema.
+                contract_addrs = (
+                    asset.get("contractAddresses")
+                    or (asset.get("profile") or {}).get("contract_addresses")
+                    or []
+                )
                 if not isinstance(contract_addrs, list):
                     continue
                 for entry in contract_addrs:
                     if not isinstance(entry, dict):
                         continue
-                    addr = (entry.get("contract_address") or "").lower()
+                    # v2 uses `contractAddress` (camelCase); v1 used `contract_address`.
+                    addr = (
+                        entry.get("contractAddress")
+                        or entry.get("contract_address")
+                        or ""
+                    ).lower()
                     if addr == contract_lower:
                         return asset.get("slug")
             return None

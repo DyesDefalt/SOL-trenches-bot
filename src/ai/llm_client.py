@@ -71,7 +71,7 @@ class LLMClient:
 
     async def complete_structured(
         self,
-        model: str,
+        model: str | None,
         system: str,
         user: str,
         response_model: type[T],
@@ -89,17 +89,25 @@ class LLMClient:
         - Any HTTP/network error
 
         Caller WAJIB handle None dengan static fallback.
+
+        When `model` is None or empty, falls back to `settings.openrouter_default_model`
+        (default: `openrouter/free` — auto-picks a free model with the required
+        capabilities). This makes the client safe to use as a fallback target
+        when the primary client's model id is unknown to OpenRouter.
         """
+        # --- Resolve model: caller's choice OR safe default ---
+        effective_model = (model or "").strip() or settings.openrouter_default_model
+
         # --- Cost cap check ---
         if not cost_tracker.can_proceed():
-            log.warning("llm_skip_cost_cap", model=model)
+            log.warning("llm_skip_cost_cap", model=effective_model)
             return None
 
         # --- Sanitize user prompt sebelum dikirim ---
         user_clean = PrivacyFilter.sanitize_text(user)
 
         body: dict[str, Any] = {
-            "model": model,
+            "model": effective_model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_clean},
@@ -123,7 +131,7 @@ class LLMClient:
                 if response.status_code == 429:
                     log.warning(
                         "llm_rate_limited",
-                        model=model,
+                        model=effective_model,
                         attempt=attempt,
                         status=429,
                     )
@@ -135,7 +143,7 @@ class LLMClient:
                 if response.status_code >= 400:
                     log.error(
                         "llm_http_error",
-                        model=model,
+                        model=effective_model,
                         status=response.status_code,
                         body=response.text[:300],
                     )
@@ -149,7 +157,7 @@ class LLMClient:
                 usage = raw.get("usage", {})
                 input_tokens = usage.get("prompt_tokens", 0)
                 output_tokens = usage.get("completion_tokens", 0)
-                cost_tracker.record(model, input_tokens, output_tokens)
+                cost_tracker.record(effective_model, input_tokens, output_tokens)
 
                 # --- Parse JSON ke Pydantic model ---
                 import json
@@ -158,7 +166,7 @@ class LLMClient:
                 except json.JSONDecodeError as e:
                     log.warning(
                         "llm_json_parse_error",
-                        model=model,
+                        model=effective_model,
                         error=str(e),
                         content=content_str[:200],
                     )
@@ -168,7 +176,7 @@ class LLMClient:
                     result = response_model.model_validate(data)  # type: ignore[attr-defined]
                     log.debug(
                         "llm_complete_structured_ok",
-                        model=model,
+                        model=effective_model,
                         response_model=response_model.__name__,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
@@ -177,7 +185,7 @@ class LLMClient:
                 except Exception as e:
                     log.warning(
                         "llm_schema_validation_error",
-                        model=model,
+                        model=effective_model,
                         response_model=response_model.__name__,
                         error=str(e),
                         data=str(data)[:300],
@@ -188,7 +196,7 @@ class LLMClient:
                 last_error = e
                 log.warning(
                     "llm_timeout",
-                    model=model,
+                    model=effective_model,
                     attempt=attempt,
                     timeout=timeout,
                 )
@@ -198,7 +206,7 @@ class LLMClient:
                 last_error = e
                 log.error(
                     "llm_unexpected_error",
-                    model=model,
+                    model=effective_model,
                     attempt=attempt,
                     error=str(e),
                 )
@@ -207,7 +215,7 @@ class LLMClient:
         # Semua attempts gagal
         log.warning(
             "llm_all_attempts_failed",
-            model=model,
+            model=effective_model,
             max_retries=max_retries,
             last_error=str(last_error) if last_error else None,
         )

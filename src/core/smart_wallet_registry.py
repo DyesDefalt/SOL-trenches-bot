@@ -143,7 +143,7 @@ class SmartWallet:
 
 def _classify_tier_from_stats(
     winrate: float,
-    realized_profit: float,
+    realized_profit_usd: float,
     min_trades: int,
     buy_count: int,
     sell_count: int,
@@ -152,14 +152,19 @@ def _classify_tier_from_stats(
     Klasifikasi otomatis berdasarkan stats GMGN.
 
     Filter awal: minimal trade count (hindari wallet baru yang stats-nya unstable).
+
+    Note: realized_profit di-return GMGN dalam USD (string -> float oleh caller),
+    BUKAN SOL. Threshold A-tier "30 SOL profit" diterjemahkan jadi ≥ $2600 USD
+    (assumes SOL ≈ $87). Jika SOL price bergerak signifikan, sesuaikan.
     """
     if (buy_count + sell_count) < min_trades:
         return "F"
 
-    if winrate >= 0.65 and realized_profit >= 30:
+    # A-tier: high winrate AND meaningful realized profit (~30 SOL equivalent).
+    if winrate >= 0.65 and realized_profit_usd >= 2600:
         return "A"
     if winrate >= 0.55:
-        # Winrate cukup tapi profit belum 30 SOL → B-tier (winrate is primary signal)
+        # Winrate decent — B-tier regardless of profit magnitude.
         return "B"
     if winrate >= 0.45:
         return "C"
@@ -324,16 +329,33 @@ class SmartWalletRegistry:
             if not stats:
                 continue
 
-            winrate = float(stats.get("winrate", 0))
-            realized = float(stats.get("realized_profit", 0))
-            total = float(stats.get("total_profit", 0))
-            buy_count = int(stats.get("buy_count", 0))
-            sell_count = int(stats.get("sell_count", 0))
-            token_num = int(stats.get("token_num", 0))
+            # GMGN /v1/user/wallet_stats actual response shape (verified May 2026):
+            #   stats = {
+            #     "realized_profit": "<USD-as-string>",      # NOT in SOL
+            #     "buy": 1454,                                # NOT 'buy_count'
+            #     "sell": 1113,                               # NOT 'sell_count'
+            #     "pnl_stat": {
+            #         "winrate": 0.352,                       # NESTED under pnl_stat
+            #         "token_num": 487,                       # NESTED under pnl_stat
+            #         ...
+            #     },
+            #     "realized_profit_pnl": "<ratio-as-string>", # multiplier ratio
+            #     "common": { tags, ... }
+            #   }
+            # See docs/gmgn-api-reference or run scripts/probe_wallet_stats.py.
+            pnl_stat = stats.get("pnl_stat") or {}
+            winrate = float(pnl_stat.get("winrate", 0) or 0)
+            realized = float(stats.get("realized_profit", 0) or 0)  # USD as STRING -> float
+            # GMGN doesn't expose `total_profit` separately on the stats endpoint.
+            # `realized_profit` is the closest equivalent; unrealized isn't returned here.
+            total = realized
+            buy_count = int(stats.get("buy", 0) or 0)
+            sell_count = int(stats.get("sell", 0) or 0)
+            token_num = int(pnl_stat.get("token_num", 0) or 0)
 
             tier = _classify_tier_from_stats(
                 winrate=winrate,
-                realized_profit=realized,
+                realized_profit_usd=realized,
                 min_trades=self.min_trades,
                 buy_count=buy_count,
                 sell_count=sell_count,
@@ -370,12 +392,20 @@ class SmartWalletRegistry:
         # KOL trades — secondary, untuk diversity
         kol_trades = await gmgn.get_kol_trades(chain=chain, limit=200)
 
-        # Extract addresses dari maker_info atau wallet field
+        # Extract addresses. GMGN OpenAPI trade objects expose the trader wallet
+        # as `maker` (top-level field) per the gmgn-skills SKILL.md. `maker_info`
+        # is a NESTED object with twitter_username + tags — NOT the address.
+        # Legacy fallbacks kept for mocked tests and older response shapes.
         addresses: list[str] = []
         seen: set[str] = set()
         for trade in [*smart_trades, *kol_trades]:
+            if not isinstance(trade, dict):
+                # Defensive: prior upstream shape bug made `trade` a string
+                # (when data was a dict and we iterated its keys). Skip cleanly.
+                continue
             wallet = (
-                trade.get("maker_info", {}).get("address")
+                trade.get("maker")
+                or trade.get("maker_info", {}).get("address")
                 or trade.get("wallet")
                 or trade.get("user_address")
                 or ""
@@ -523,10 +553,12 @@ class SmartWalletRegistry:
         return tier_counts
 
     def _update_wallet_from_stats(self, wallet: str, stats: dict, chain: str) -> None:
-        winrate = float(stats.get("winrate", 0))
-        realized = float(stats.get("realized_profit", 0))
-        buy_count = int(stats.get("buy_count", 0))
-        sell_count = int(stats.get("sell_count", 0))
+        # Same GMGN response shape mapping as bootstrap_from_gmgn (see comment there).
+        pnl_stat = stats.get("pnl_stat") or {}
+        winrate = float(pnl_stat.get("winrate", 0) or 0)
+        realized = float(stats.get("realized_profit", 0) or 0)  # USD string -> float
+        buy_count = int(stats.get("buy", 0) or 0)               # NOT 'buy_count'
+        sell_count = int(stats.get("sell", 0) or 0)             # NOT 'sell_count'
 
         # Skip update kalau ini manual/blacklist (preserve override)
         existing = self._wallets.get(wallet.lower())
@@ -535,7 +567,7 @@ class SmartWalletRegistry:
 
         tier = _classify_tier_from_stats(
             winrate=winrate,
-            realized_profit=realized,
+            realized_profit_usd=realized,
             min_trades=self.min_trades,
             buy_count=buy_count,
             sell_count=sell_count,
@@ -547,10 +579,10 @@ class SmartWalletRegistry:
             chain=chain,
             winrate=winrate,
             realized_profit=realized,
-            total_profit=float(stats.get("total_profit", 0)),
+            total_profit=realized,  # GMGN endpoint doesn't expose total_profit separately
             buy_count=buy_count,
             sell_count=sell_count,
-            token_num=int(stats.get("token_num", 0)),
+            token_num=int(pnl_stat.get("token_num", 0) or 0),
             source="auto",
         )
 
