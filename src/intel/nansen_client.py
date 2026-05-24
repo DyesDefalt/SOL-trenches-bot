@@ -97,8 +97,12 @@ class NansenClient:
             timeout=30.0,
             max_retries=3,
         )
-        # 20 req/sec sustained; burst=20 to match hard cap
-        self._limiter = TokenBucket(rps=20.0, burst=20.0, name="nansen")
+        # Nansen rate limits are tier-dependent; their docs example public
+        # endpoints quote ~60 req/min (≈1 RPS) for the standard plans. We use
+        # 1 RPS sustained with a burst of 3 to stay well under the cap and
+        # avoid 429 storms during bursty scans. Bump if you have a higher
+        # tier and observe headroom in NANSEN_DAILY_CREDIT_CAP usage.
+        self._limiter = TokenBucket(rps=1.0, burst=3.0, name="nansen")
         self.credits = CreditTracker()
 
     async def close(self) -> None:

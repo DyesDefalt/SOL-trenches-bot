@@ -80,6 +80,18 @@ class MessariClient:
     # Asset profile
     # ------------------------------------------------------------------
 
+    def _is_enabled(self) -> bool:
+        """Whether to actually fire HTTP requests at Messari.
+
+        The asset profile endpoint (and most others on the metrics API) now
+        require an Enterprise tier in 2026 — basic/free keys get 401. Default
+        is OFF so the client short-circuits to empty/None without producing
+        log spam. Flip via ``settings.messari_enabled``
+        (env: ``MESSARI_ENABLED``) only if you actually have an Enterprise key.
+        CoinGecko covers the same cross-ref use case for free.
+        """
+        return bool(getattr(settings, "messari_enabled", False))
+
     @cached(prefix="messari:profile", ttl=600)
     async def get_asset_profile(self, slug: str) -> dict:
         """
@@ -92,6 +104,8 @@ class MessariClient:
         marketData, links, etc. inline. No fields= filter needed; Messari
         returns the full asset payload by default.
         """
+        if not self._is_enabled():
+            return {}
         try:
             result = await self._get(f"/metrics/v1/assets/{slug}")
             return result.get("data", result)
@@ -125,6 +139,8 @@ class MessariClient:
         the old wrapper shape may need to read `data["marketData"]` instead
         of `data` directly.
         """
+        if not self._is_enabled():
+            return {}
         try:
             result = await self._get(f"/metrics/v1/assets/{slug}")
             data = result.get("data", result)
@@ -157,6 +173,8 @@ class MessariClient:
 
         Returns list of news items or [] on error.
         """
+        if not self._is_enabled():
+            return []
         params = {
             "fields": "id,title,published_at,author,references",
             "page": 1,
@@ -188,6 +206,8 @@ class MessariClient:
 
         Returns list of news items or [] on error.
         """
+        if not self._is_enabled():
+            return []
         try:
             result = await self._get(f"/news/{slug}")
             data = result.get("data", [])
@@ -223,6 +243,8 @@ class MessariClient:
         Cached 24h since contract→slug mapping is stable.
         Returns slug string or None if not found.
         """
+        if not self._is_enabled():
+            return None
         # v2 endpoint accepts `search` (matches contract too) + `limit`.
         # We pass the contract directly so Messari narrows the list server-side.
         params: dict = {

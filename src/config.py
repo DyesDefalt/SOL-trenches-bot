@@ -70,10 +70,14 @@ class Settings(BaseSettings):
     redis_password: str = ""
 
     # --- Trading config ---
+    # Tuned for *frequent paper trading* — wider candidate funnel, mid-range
+    # score requirement. AI rug-check + safety filters remain strict, so even
+    # at score 60 we still reject scams. Adjust upward (e.g. 75+) once you
+    # see false positives in paper trade outcomes.
     max_position_size_sol: float = 0.05
-    max_concurrent_positions: int = 2
-    min_score_to_buy: int = 75
-    min_score_to_alert: int = 65
+    max_concurrent_positions: int = 3            # was 2 — allow a third concurrent pos
+    min_score_to_buy: int = 60                   # was 75 — relax for frequent trades
+    min_score_to_alert: int = 45                 # was 65 — see borderline cases in TG
     slippage_bps: int = 1500
     priority_fee_microlamports: int = 10_000
     jito_tip_lamports: int = 1_000_000
@@ -119,8 +123,12 @@ class Settings(BaseSettings):
     score_penalty_bundle: int = -10
 
     # --- Filter ---
-    filter_max_mcap_usd: float = 60_000
-    filter_min_liquidity_usd: float = 8_000
+    # Widened for frequent trading. Original config targeted only ultra-fresh
+    # micro-caps (<$60k). Now we also allow mid-cap memes (<$500k) so the
+    # scanner has a healthier candidate pool. Safety guards (security score,
+    # dev holding, bundler %) are unchanged — quality remains protected.
+    filter_max_mcap_usd: float = 500_000          # was 60k — mid-cap memes allowed
+    filter_min_liquidity_usd: float = 5_000       # was 8k — slightly more lenient
     filter_min_gmgn_security_score: int = 70
     filter_max_dev_holding_pct: float = 15
     filter_max_bundle_supply_pct: float = 30
@@ -182,10 +190,12 @@ class Settings(BaseSettings):
     ai_wallet_blacklist_min_confidence: float = 0.85
 
     # --- News provider (Phase 9) ---
-    # PREFERRED: cryptocurrency.cv (Free Crypto News API). No API key,
-    # no signup, 130+ aggregated sources, built-in sentiment + Solana category.
-    # Drop-in replacement for CryptoPanic — phase9_smoke + NewsAggregator
-    # now default to this client (CryptoCurrencyCvClient).
+    # cryptocurrency.cv added Cloudflare BOT_BLOCKED protection — all calls
+    # return 403 from VPS source IPs. DISABLED by default. Set to True only
+    # if running from a residential IP or behind a residential proxy. When
+    # disabled, the client returns empty results without firing any request
+    # (no log spam, no rate-limit risk on a dead source).
+    cryptocurrencycv_enabled: bool = False
     cryptocurrencycv_base_url: str = "https://cryptocurrency.cv"
 
     # --- CryptoPanic (legacy / optional fallback) ---
@@ -198,6 +208,11 @@ class Settings(BaseSettings):
     cryptopanic_base_url: str = "https://cryptopanic.com/api/developer/v2"
 
     # --- Messari (Phase 9 cross-ref + news) ---
+    # The asset profile endpoint requires Enterprise tier ($1k+/mo) in 2026.
+    # DISABLED by default. Set `messari_enabled=True` and provide an
+    # Enterprise key to re-enable. When disabled, client returns {} without
+    # firing requests. CoinGecko cross-ref covers the same use case for free.
+    messari_enabled: bool = False
     messari_api_key: str = ""
     # Host migration: data.messari.io is gone, current host is api.messari.io.
     # Paths also changed: /api/v1/assets/{slug}/profile -> /metrics/v1/assets/{slug}.

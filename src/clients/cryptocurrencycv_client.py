@@ -168,6 +168,18 @@ class CryptoCurrencyCvClient:
     # call these signatures unchanged)
     # ------------------------------------------------------------------
 
+    def _is_enabled(self) -> bool:
+        """Whether to actually fire HTTP requests at cryptocurrency.cv.
+
+        cryptocurrency.cv now sits behind Cloudflare and returns
+        ``403 BOT_BLOCKED`` to non-residential IPs. Default is OFF — calls
+        short-circuit and return empty results without producing log noise
+        or eating from the source's rate budget. Flip via
+        ``settings.cryptocurrencycv_enabled`` (env: ``CRYPTOCURRENCYCV_ENABLED``)
+        when running from a residential IP or behind a residential proxy.
+        """
+        return bool(getattr(settings, "cryptocurrencycv_enabled", False))
+
     @cached(prefix="ccv:sol_news", ttl=60)
     async def get_solana_news(self, filter: str = "hot", limit: int = 20) -> list[dict]:
         """
@@ -181,6 +193,8 @@ class CryptoCurrencyCvClient:
         Returns a list normalized to the CryptoPanic post shape (see
         `_normalize_article` above).
         """
+        if not self._is_enabled():
+            return []
         try:
             # /api/news supports category filtering. We pull a slightly larger
             # page than `limit` so the local sentiment filter doesn't starve.
@@ -224,6 +238,8 @@ class CryptoCurrencyCvClient:
         Uses /api/search?q=<ticker>; the response shape matches /api/news.
         Optional sentiment filter applied locally.
         """
+        if not self._is_enabled():
+            return []
         try:
             ticker_clean = (ticker or "").strip()
             if not ticker_clean:
@@ -262,6 +278,8 @@ class CryptoCurrencyCvClient:
         Prefer the dedicated /api/trending endpoint (returns mention counts +
         sentiment). Fall back to aggregating tags from hot news if that fails.
         """
+        if not self._is_enabled():
+            return []
         try:
             result = await self._get("/api/trending", params={"hours": 24})
             topics = (
@@ -333,6 +351,8 @@ class CryptoCurrencyCvClient:
 
         `period`: "1h" | "24h" | "7d" | "30d". Returns {} on error.
         """
+        if not self._is_enabled():
+            return {}
         try:
             result = await self._get(
                 "/api/sentiment",
