@@ -10,6 +10,10 @@ Wants=network-online.target
 # Hard requirements so systemd refuses to start the bot when the DB or cache
 # is down. Disable these if running Postgres/Redis on a remote host.
 Requires=postgresql.service redis-server.service
+# Cap rapid-failure loops: max 5 restarts within 300s, otherwise give up.
+# (StartLimit* belongs in [Unit], not [Service], on systemd ≥ 230.)
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 # Type=simple keeps it foolproof — no sd_notify integration required. Switch
@@ -28,11 +32,8 @@ Environment="PATH=/home/ubuntu/SOL-trenches-bot/venv/bin:/usr/local/bin:/usr/bin
 ExecStart=/home/ubuntu/SOL-trenches-bot/venv/bin/python -m src.main
 
 # Restart strategy: any non-zero exit OR crash → wait 10s → start again.
-# Cap rapid-failure loops: max 5 restarts within 300s, otherwise give up.
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # Pipe stdout/stderr to journalctl so `journalctl -u sol-trenches-bot -f`
 # shows live logs. Optionally also append to a flat file for grep speed.

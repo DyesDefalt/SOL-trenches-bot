@@ -996,6 +996,15 @@ class Bot:
 
 
 async def main() -> None:
+    # Single-instance guard. Prevents two simultaneous bot processes from
+    # racing on the health port (which used to fail with "address already
+    # in use" deep in setup, leaving a zombie holding the port). We bind a
+    # Linux abstract unix socket scoped by the health port — second process
+    # exits immediately with a clear message before doing any work.
+    _instance_lock = _acquire_single_instance_lock()
+    if _instance_lock is None:
+        return
+
     bot = Bot()
 
     loop = asyncio.get_running_loop()
@@ -1016,6 +1025,46 @@ async def main() -> None:
     except Exception as e:
         log.exception("bot_fatal_error", error=str(e))
         raise
+
+
+def _acquire_single_instance_lock():
+    """Try to acquire a single-instance lock. Returns the socket on
+    success, ``None`` if another process already holds it (caller should
+    exit). Best-effort on non-Linux platforms.
+    """
+    import socket as _socket
+    import sys as _sys
+
+    lock_name = f"\0sol-trenches-bot-{settings.health_port}"
+    try:
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_DGRAM)
+        sock.bind(lock_name)
+    except (OSError, AttributeError) as e:
+        # AF_UNIX unsupported (Windows) → skip the guard. The health-port
+        # bind in HealthServer.start() will catch the duplicate later.
+        if isinstance(e, AttributeError):
+            log.debug("instance_lock_skipped_platform")
+            return _socket.socket()  # truthy sentinel; will be GC'd later
+        # Bind failed → another bot instance owns the lock. Exit fast.
+        log.error(
+            "instance_lock_held",
+            error=str(e),
+            health_port=settings.health_port,
+            note=(
+                "Another bot process is already running. Stop it first: "
+                "`sudo systemctl stop sol-trenches-bot` and "
+                "`sudo fuser -k {0}/tcp`."
+            ).format(settings.health_port),
+        )
+        _sys.stderr.write(
+            f"FATAL: another sol-trenches-bot instance is already running "
+            f"(health port {settings.health_port}). "
+            f"Run `sudo systemctl stop sol-trenches-bot` and "
+            f"`sudo fuser -k {settings.health_port}/tcp` first.\n"
+        )
+        return None
+    log.debug("instance_lock_acquired", port=settings.health_port)
+    return sock
 
 
 if __name__ == "__main__":

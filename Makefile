@@ -110,18 +110,25 @@ run:
 	. venv/bin/activate && python -m src.main
 
 db-init:
-	psql -U bot -d solana_bot -f migrations/001_initial.sql
+	@echo "Applying all SQL migrations in order..."
+	@for f in migrations/*.sql; do \
+		echo "=== $$f ==="; \
+		sudo -u postgres psql -d solana_bot < $$f || { \
+			echo "Migration $$f failed"; exit 1; \
+		}; \
+	done
+	@echo "✓ All migrations applied."
 
 db-migrate-phase10:
 	@echo "Running Phase 10 migrations (strategies + price_alerts)..."
-	psql -U bot -d solana_bot -f migrations/002_strategies.sql
-	psql -U bot -d solana_bot -f migrations/003_price_alerts.sql
+	sudo -u postgres psql -d solana_bot < migrations/002_strategies.sql
+	sudo -u postgres psql -d solana_bot < migrations/003_price_alerts.sql
 	@echo "Phase 10 migrations done. 4 strategies seeded: conservative, balanced, aggressive, dip_buy"
 
 db-migrate-phase11:
 	@echo "Running Phase 11 migrations (trench_low_mcap + position overrides)..."
-	psql -U bot -d solana_bot -f migrations/004_trench_low_mcap.sql
-	psql -U bot -d solana_bot -f migrations/005_position_overrides.sql
+	sudo -u postgres psql -d solana_bot < migrations/004_trench_low_mcap.sql
+	sudo -u postgres psql -d solana_bot < migrations/005_position_overrides.sql
 	@echo "Phase 11 migrations done. 5th strategy 'trench_low_mcap' available."
 	@echo "Activate with /strategy trench_low_mcap in Telegram."
 
